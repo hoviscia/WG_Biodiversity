@@ -1,0 +1,264 @@
+---
+title: "Biodiversity Indicators"
+output: # html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+# R Set-up
+
+```{r}
+# Clear workspace
+rm(list = ls())
+
+# Libraries 
+library(terra)
+library(here)
+library(purrr)
+library(dplyr)
+library(tigris)
+library(sf)
+
+# define directories
+dir <- here()
+dat.dir <- file.path(dir, "data", "raw")
+roi.dir <- file.path(dir, "data", "studyarea")
+dum.dir <- file.path(dir, "data", "dummy")
+
+```
+
+We developed biodiversity indicators in three categories:  Special Places, Species & Habitats, and Grassland Condition. 
+
+
+# 0.1 Study Area
+
+Load in the study areas. Will align all data to this crs.
+
+ROI 1 = TBD
+ROI 2 = Clip any data to this one
+ROI 3 = TBD
+
+```{r}
+
+roi1 <- vect(file.path(roi.dir, "class_study_area_aligned_cnvc_Dec2025.shp"))
+roi2 <- vect(file.path(roi.dir, "modelling_extent_aligned_cnvc_Jan2026.shp"))
+roi3 <- vect(file.path(roi.dir, "modelling_study_area_aligned_cnvc_Jan2026.shp"))
+
+# plot(roi1)
+# plot(roi2)
+# plot(roi3, main="roi3")
+
+```
+
+
+# 0.2 Dummy Data
+
+```{r}
+base_dum <- rast(file.path(dum.dir, "eccc_reclass_reproj_algn_binary.tif"))
+fut_dum <- rast(file.path(dum.dir, "AAFC_LUTS_2020_5-classes.tif"))
+
+plot(base_dum)
+plot(fut_dum)
+```
+
+
+# 1.0 Special Places
+
+## 1.1 Key biodiversity areas
+
+Includes Accepted and draft KBAS => combine into one
+Check for data sensitivities
+
+
+```{r}
+# Define path to the geodatabase(s)
+kba_path <- file.path(dat.dir, "1_special_places", "1.1_KBAs", "AcceptedKBAs.gdb")
+kba_draft_path <- file.path(dat.dir, "1_special_places", "1.1_KBAs", "DRAFTKBAs.gdb")
+
+# List all layers in the geodatabase(s)
+st_layers(kba_path)
+st_layers(kba_draft_path)
+
+# Read the main feature class from the geodatabase(s)
+kba <- st_read(kba_path, layer = "KBASite")
+kba_draft <- st_read(kba_draft_path, layer = "DRAFT_KBASite")
+
+# Convert sf objects to terra SpatVector objects
+kba <- vect(kba)
+kba_draft <- vect(kba_draft)
+
+# Harmonize to Study Area CRS
+kba <- project(kba_draft, roi1)
+kba_draft <- project(kba_draft, roi1)
+
+# clean-up
+rm(kba_path, kba_draft_path)
+```
+
+## 1.2 ECCC priority places for species-at-risk (SAR)
+
+```{r}
+# Define path to the geodatabase(s)
+priority_path <- file.path(dat.dir, "1_special_places", "1.2_PriorityPlaces", "PriorityPlaces.gdb")
+
+# List all layers in the geodatabase(s)
+st_layers(priority_path)
+
+# Read the main feature class from the geodatabase(s)
+priority <- st_read(priority_path, layer = "PriorityPlacesBoundary")
+
+# Convert sf objects to terra SpatVector objects
+priority <- vect(priority)
+
+# Harmonize to Study Area CRS
+priority <- project(priority, roi1)
+
+# clean-up
+rm(priority_path)
+```
+
+## 1.3 ECCC community nominated priority places
+
+```{r}
+# Define path to the geodatabase(s)
+comm_priority_path <- file.path(dat.dir, "1_special_places", "1.3_CommunityNominated_PriorityPlaces", "CommunityNominated_PriorityPlaces.gdb")
+
+# List all layers in the geodatabase(s)
+st_layers(comm_priority_path)
+
+# Read the main feature class from the geodatabase(s)
+comm_priority <- st_read(comm_priority_path, layer = "CommunityNominated_PriorityPlaces")
+
+# Convert sf objects to terra SpatVector objects
+comm_priority <- vect(comm_priority)
+
+# Harmonize to Study Area CRS
+comm_priority <- project(comm_priority, roi1)
+
+# clean-up
+rm(comm_priority_path)
+```
+
+## 1.4 Relatively rare grasses
+
+Waiting for data from Alison
+
+
+# 2.0 Species & Habitats
+
+## 2.1 Climate Refugia
+
+Multiple scenarios
+2050s
+2080s
+
+Each timeframe has a layer for songbirds, trees, and combined for a total of 6.
+
+```{r, eval=F}
+# Define path to the geodatabase(s)
+refugia_path <- file.path(dat.dir, "2_species_and_habitats", "2.1_clim_refugia", "NA_Refugia", "2050s")
+
+# List all layers in the geodatabase(s)
+st_layers(refugia_path)
+
+# Read the main feature class from the geodatabase(s)
+comm_priority <- st_read(refugia_path, layer = "CommunityNominated_PriorityPlaces")
+
+# Convert sf objects to terra SpatVector objects
+comm_priority <- vect(comm_priority)
+
+# Harmonize to Study Area CRS
+comm_priority <- project(comm_priority, roi1)
+
+# clean-up
+rm(refugia_path)
+```
+
+## 2.2 Upland priority areas for Prairie Habitat 
+
+Add details
+
+```{r}
+# Define path to the file(s)
+upland_path <- file.path(dat.dir, "2_species_and_habitats", "2.2_PriorityAreaAnalysisResults", "PriorityAreasPolygons", "UplandSpecies", "X1_Landbirds.ABF_M_q80.shp")
+
+upland <- vect(upland_path)
+
+# Harmonize to Study Area CRS
+upland <- project(upland, roi1)
+
+# clean-up
+rm(upland_path)
+
+```
+
+
+## 2.3 Areas important for bird population growth
+
+```{r}
+# Define path to the file(s)
+bird_pop_path <- file.path(dat.dir, "2_species_and_habitats", "2.3_CGBWG_Data_Share", "PriorityAreasPolygons", "UplandSpecies", "X1_Landbirds.ABF_M_q80.shp")
+```
+
+
+## 2.4 Richness of species-at-risk
+
+Struggling to download (Ronnie to send his copy)
+
+## 2.5.1 Wildlife habitat availability on farmland: High-Very High Capacity
+
+```{r}
+# Define path to the geodatabase(s)
+farm_path <- file.path(dat.dir, "species_and_habitats", "farmland_habitat", "AEI_MGMNT_WHC_GDB", "AEI_MGMNT_WHC_GDB.gdb")
+
+# List all layers in the geodatabase(s)
+st_layers(farm_path)
+
+# Read the main feature class from the geodatabase(s)
+comm_priority <- st_read(refugia_path, layer = "CommunityNominated_PriorityPlaces")
+
+# Convert sf objects to terra SpatVector objects
+comm_priority <- vect(comm_priority)
+
+# Harmonize to Study Area CRS
+comm_priority <- project(comm_priority, roi1)
+
+# clean-up
+rm(refugia_path)
+```
+
+## 2.5.2 Wildlife habitat availability on farmland: Large-Moderate Decrease
+
+```{r}
+
+```
+
+## 2.6 Species distribution model for grassland birds
+
+Analysis being done externally by Barry Robinson
+
+## 2.7 Habitat suitability for grassland species
+
+Analysis being done externally by James Paterson
+
+
+# 3.0 Grassland Condition
+
+## 3.1 Intact grasslands
+
+```{r}
+
+```
+
+## 3.2 Connectivity
+
+```{r}
+
+```
+
+## 3.3 Native grasslands
+
+```{r}
+
+```
+

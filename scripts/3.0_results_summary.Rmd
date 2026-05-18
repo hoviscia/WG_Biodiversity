@@ -1,0 +1,768 @@
+---
+title: "Summarize Results"
+output: # html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+# R Set-up
+
+```{r}
+# Clear workspace
+rm(list = ls())
+
+# Libraries 
+library(terra)
+library(here)
+library(purrr)
+library(dplyr)
+library(tigris)
+library(sf)
+library(ggplot2)
+library(scales)
+
+# Authenticate aws
+source(here::here('aws_cred.R'))
+
+# Base S3 location (GDAL-style path)
+s3_base <- "/vsis3/sagemaker-gst-stage.sharing/ciara-hovis/TomoPrairie/bd_data"
+s3_base_res <- "/vsis3/sagemaker-gst-stage.sharing/ciara-hovis/TomoPrairie"
+
+dat.dir <- file.path(s3_base, "raw")
+roi.dir <- file.path(s3_base, "studyarea")
+dum.dir <- file.path(s3_base, "dummy")
+ind.dir <- file.path(s3_base, "indicators")
+results.dir <- file.path(s3_base_res, "results")
+
+
+# Define directories (OLD)
+# dir <- here()
+# dat.dir <- file.path(dir, "data", "raw")
+# roi.dir <- file.path(dir, "data", "studyarea")
+# dum.dir <- file.path(dir, "data", "dummy")
+```
+
+We developed biodiversity indicators in three categories:  Special Places, Species & Habitats, and Grassland Condition. 
+
+
+# 0.1 Study Area
+
+Load in the study areas. Will align all data to this crs.
+
+ROI 1 = TBD
+ROI 2 = TBD
+ROI 3 = Clip any data to this one
+
+```{r}
+
+roi1 <- vect(file.path(roi.dir, "class_study_area_aligned_cnvc_Dec2025.shp"))
+roi2 <- vect(file.path(roi.dir, "modelling_extent_aligned_cnvc_Jan2026.shp"))
+roi3 <- vect(file.path(roi.dir, "modelling_study_area_aligned_cnvc_Jan2026.shp"))
+
+# plot(roi1)
+# plot(roi2)
+# plot(roi3, main="roi3")
+
+```
+
+
+
+## 0.2 Dummy Data
+
+```{r}
+dum_base <- rast(file.path(dum.dir, "eccc_reclass_reproj_algn_binary.tif"))
+dum_base <- rast(file.path(dum.dir, "gpw_reproj_algn_natseminat_noshrub_masked.tif"))
+dum_fut <- rast(file.path(dum.dir, "AAFC_LUTS_2020_5-classes.tif"))
+
+# plot(dum_base)
+# plot(dum_fut)
+
+```
+
+## 0.2 Eco-district Data
+```{r}
+# eco_dist$ECODISTRIC is ID column
+eco_dist <-  vect(file.path(roi.dir, "national-ecological-framework-for-canada", "Ecodistricts",  "ecodistricts_clean_modelling-extent.shp"))
+
+# plot(eco_dist)
+
+eco_dist_lut <- s3read_using(
+  read.csv,
+  bucket = "sagemaker-gst-stage.sharing",
+  object = "ciara-hovis/TomoPrairie/results/ecodistrict_lookup.csv"
+)
+
+
+
+```
+
+
+## 0.3 Results Data
+
+```{r}
+ind_study_area <- s3read_using(
+  read.csv,
+  bucket = "sagemaker-gst-stage.sharing",
+  object = "ciara-hovis/TomoPrairie/results/indicators_studyarea_pixel_counts.csv"
+)
+
+ind_ecodist <- s3read_using(
+  read.csv,
+  bucket = "sagemaker-gst-stage.sharing",
+  object = "ciara-hovis/TomoPrairie/results/indicators_ecodistrict_pixel_counts.csv"
+)
+
+```
+
+## 0.4 Province Data
+```{r}
+prov <-  vect(file.path(roi.dir, "can_provinces","lpr_000b21a_e.shp"))
+prov <- project(prov, dum_base)
+
+```
+
+
+
+## 0.5 Indicator Data
+```{r}
+# Find matching GeoPackage files
+objs <- get_bucket(
+  bucket = "sagemaker-gst-stage.sharing",
+  prefix = "ciara-hovis/TomoPrairie/bd_data/indicators/"
+)
+
+gpkg_files <- paste0(
+  "/vsis3/sagemaker-gst-stage.sharing/",
+  sapply(objs, `[[`, "Key")
+)
+
+gpkg_files <- gpkg_files[grepl("\\.gpkg$", gpkg_files)]
+
+vectors <- lapply(gpkg_files, vect)
+
+```
+
+# 1.0 Summarize Tabular Results
+
+```{r}
+# Convert to area
+ind_study_area$m2 <- ind_study_area$pixel_ones * 900
+ind_study_area$ha <- ind_study_area$pixel_ones * 0.09
+
+ind_ecodist$m2 <- ind_ecodist$pixel_ones * 900
+ind_ecodist$ha <- ind_ecodist$pixel_ones * 0.09
+
+```
+
+Calc total grassland in study area
+```{r}
+# ---- Crop base raster ----
+dum_base <- crop(dum_base, roi3, mask = TRUE)
+
+# Count pixels equal to 1
+n_cells_1 <- global(dum_base == 1, "sum", na.rm = TRUE)[1,1]
+
+# Area in square meters
+area_m2 <- n_cells_1 * 30 * 30
+
+# Area in square meters
+area_ha <- n_cells_1 * 0.09
+
+area_m2
+area_ha
+
+
+```
+
+Calc grass land by ecoregion
+```{r}
+# ---- Keep only grassland (value == 1) ----
+grass <- dum_base == 1
+eco_reg <-  vect(file.path(roi.dir, "national-ecological-framework-for-canada", "Ecoregions",  "ecoregions_clean_modelling-extent.shp"))
+
+
+# Plot polygons colored by ECOREGION1
+plot(
+  eco_reg,
+  "ECOREGION1",
+  col = rainbow(length(unique(eco_reg$ECOREGION1))),
+  border = "grey40",
+  main = "Ecoregions"
+)
+
+plot(roi3, add=T, col="purple")
+# ---- Extract grassland pixel counts by ecoregion ----
+grass_by_eco <- extract(
+  grass,
+  eco_reg,
+  fun = sum,
+  na.rm = TRUE
+)
+
+# ---- Combine with ecoregion names ----
+eco_grass_area <- data.frame(
+  ECOREGION1   = eco_reg$ECOREGION1,
+  EcoREgion_ID = eco_reg$ECOREGION_,
+  grass_cells = grass_by_eco[, 2]
+)
+
+# ---- Convert pixel counts to area ----
+# 30 m x 30 m = 900 m^2 = 0.09 ha
+eco_grass_area$grass_m2 <- eco_grass_area$grass_cells * 900
+eco_grass_area$grass_km2 <- (eco_grass_area$grass_cells * 900)/1000000
+eco_grass_area$grass_ha <- eco_grass_area$grass_cells * 0.09
+
+# ---- Final clean data frame ----
+eco_grass_df <- as.data.frame(eco_grass_area)[, c("EcoREgion_ID", "ECOREGION1", "grass_m2", "grass_km2", "grass_ha")]
+
+eco_grass_df
+
+bucket_name <- "sagemaker-gst-stage.sharing"
+eco_grass_object <- "ciara-hovis/TomoPrairie/results/eco_grass_area.csv"
+
+tmp_file <- tempfile(fileext = ".csv")
+
+write.csv(
+  eco_grass_df,
+  tmp_file,
+  row.names = FALSE
+)
+
+put_object(
+  file   = tmp_file,
+  bucket = bucket_name,
+  object = eco_grass_object
+)
+
+```
+
+
+```{r}
+
+ind_ecoreg <- ind_ecodist %>%
+  left_join(
+    eco_dist_lut,
+    by = "ECODISTRIC"
+  )
+
+ind_ecoreg_sum <- ind_ecoreg %>%
+  group_by(indicator_id, ECOREGION_) %>%
+  summarise(
+    ha = sum(ha, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ind_ecozon_sum <- ind_ecoreg %>%
+  group_by(indicator_id, ECOZONE_ID) %>%
+  summarise(
+    ha = sum(ha, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+bucket_name <- "sagemaker-gst-stage.sharing"
+results_object <- "ciara-hovis/TomoPrairie/results/indicator_ecoregion_ha.csv"
+results2_object <- "ciara-hovis/TomoPrairie/results/indicator_ecozone_ha.csv"
+
+tmp_file <- tempfile(fileext = ".csv")
+
+write.csv(
+  ind_ecoreg_sum,
+  tmp_file,
+  row.names = FALSE
+)
+
+put_object(
+  file   = tmp_file,
+  bucket = bucket_name,
+  object = results_object
+)
+
+tmp_file <- tempfile(fileext = ".csv")
+
+write.csv(
+  ind_ecozon_sum,
+  tmp_file,
+  row.names = FALSE
+)
+
+put_object(
+  file   = tmp_file,
+  bucket = bucket_name,
+  object = results2_object
+)
+
+```
+
+
+
+# 2.0 Make Maps
+
+Baseline grassland
+```{r}
+
+library(terra)
+library(sf)
+library(ggplot2)
+library(scales)
+library(units)
+
+
+# ---- Aggregate raster ----
+dum_plot <- aggregate(dum_base, fact = 33, fun = mean, na.rm = TRUE)
+
+grass_df <- as.data.frame(dum_plot, xy = TRUE, na.rm = TRUE)
+names(grass_df)[3] <- "grass_prop"
+
+# ---- Raster footprint (AFTER dum_plot exists) ----
+raster_extent <- as.polygons(ext(dum_plot), crs = crs(dum_plot))
+raster_extent_sf <- st_as_sf(raster_extent)
+
+# ---- Saskatoon (projected correctly) ----
+saskatoon <- vect(
+  data.frame(
+    name = "Saskatoon",
+    lon = -106.6702,
+    lat = 52.1579
+  ),
+  geom = c("lon", "lat"),
+  crs = "EPSG:4326"
+)
+
+saskatoon <- project(saskatoon, crs(dum_plot))
+saskatoon_df <- as.data.frame(saskatoon, geom = "xy")
+
+# ---- Province borders (sf + intersection) ----
+prov_sf <- st_as_sf(prov)
+
+# Keep only provinces intersecting the grassland raster
+prov_clip_sf <- prov_sf[
+  st_intersects(prov_sf, raster_extent_sf, sparse = FALSE),
+]
+
+# ---- Study area ----
+roi3_sf <- st_as_sf(roi3)
+
+# ---- NeW: zoom extent based on study area + buffer ----
+roi_bbox <- st_bbox(roi3_sf)
+
+buffer_m <- 50000  # 50 km buffer (adjust if desired)
+
+xlim <- c(roi_bbox["xmin"] - buffer_m,
+          roi_bbox["xmax"] + buffer_m)
+
+ylim <- c(roi_bbox["ymin"] - buffer_m,
+          roi_bbox["ymax"] + buffer_m)
+
+# ---- Plot ----
+ggplot() +
+
+  # Grassland raster
+  geom_tile(
+    data = grass_df,
+    aes(x = x, y = y, fill = grass_prop)
+  ) +
+
+  # Intersecting provinces
+  geom_sf(
+    data = prov_clip_sf,
+    fill = NA,
+    color = "black",
+    linewidth = 0.4
+  ) +
+
+  # Study area
+  geom_sf(
+    data = roi3_sf,
+    fill = NA,
+    color = "red",
+    linewidth = 0.6
+  ) +
+
+  # Saskatoon point
+  geom_point(
+    data = saskatoon_df,
+    aes(x = x, y = y),
+    color = "red",
+    size = 3
+  ) +
+
+  # Saskatoon label
+  geom_text(
+    data = saskatoon_df,
+    aes(x = x, y = y, label = name),
+    nudge_y = 40000,
+    size = 4,
+    fontface = "bold",
+    color = "white"
+  ) +
+
+  scale_fill_viridis_c(
+    option = "viridis",
+    name = "Grassland cover",
+    labels = percent_format(accuracy = 1),
+    guide = guide_colorbar(
+      barwidth = unit(16, "cm"),
+      barheight = unit(0.6, "cm"),
+      title.position = "top",
+      label.position = "bottom"
+    )
+  ) +
+
+  # Zoom to study area + buffer
+  coord_sf(
+    crs  = st_crs(roi3_sf),
+    xlim = xlim,
+    ylim = ylim,
+    expand = FALSE
+  ) +
+
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text  = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold")
+  ) +
+  labs(
+    title = "Grassland Distribution",
+    subtitle = "Proportion grassland per ~1 km² pixel"
+  )
+
+grassland_plot <- last_plot()
+
+```
+
+
+Indicators (study area)
+```{r}
+library(tidyterra)
+
+# Convert indicator vectors to sf (REQUIRED)
+vectors_sf <- lapply(vectors, st_as_sf)
+
+# Make sure ROI and provinces are sf (safe even if already sf)
+roi3_sf <- st_as_sf(roi3)
+prov_clip_sf <- st_as_sf(prov_clip_sf)
+
+ggplot() +
+
+  # Grassland raster (FAST, native)
+  geom_spatraster(
+    data = dum_base
+    ) +
+  
+  scale_fill_gradient(
+  low = "white",
+  high = "gray26",
+  na.value = "transparent",
+  guide = "none"
+  ) +
+
+  # Province borders
+  geom_sf(
+    data = prov_clip_sf,
+    fill = NA,
+    color = "black",
+    linewidth = 0.4
+    ) +
+
+  # Indicator vectors
+  geom_sf(
+    data = vectors_sf[[1]],
+    aes(color = "KBAs"),
+    fill = alpha("#4477AA", 0.3),
+    linewidth = 0.6
+    ) +
+  
+  geom_sf(
+    data = vectors_sf[[2]],
+    aes(color = "KBAs (draft)"),
+    fill = alpha("#228833", 0.3),
+    linewidth = 0.6
+    ) +
+  
+  geom_sf(
+    data = vectors_sf[[3]],
+    aes(color = "ECCC for SAR"),
+    fill = alpha("#CCBB44", 0.3),
+    linewidth = 0.6
+  ) +
+  geom_sf(
+    data = vectors_sf[[4]],
+    aes(color = "ECCC Comm Nom"),
+    fill = alpha("#AA3377", 0.3),
+    linewidth = 0.6
+  ) +
+
+  # Study area
+  geom_sf(
+    data = roi3_sf,
+    fill = NA,
+    color = "red",
+    linewidth = 0.8
+  ) +
+
+ scale_color_manual(
+  breaks = c(
+    "KBAs",
+    "KBAs (draft)",
+    "ECCC for SAR",
+    "ECCC Comm Nom"
+  ),
+  values = c(
+    "KBAs" = "#4477AA",
+    "KBAs (draft)" = "#228833",
+    "ECCC for SAR" = "#CCBB44",
+    "ECCC Comm Nom" = "#AA3377"
+  ),
+  name = "Indicators"
+) +
+
+  coord_sf(
+    crs = st_crs(roi3_sf),
+    xlim = c(st_bbox(roi3_sf)["xmin"] - 50000,
+             st_bbox(roi3_sf)["xmax"] + 50000),
+    ylim = c(st_bbox(roi3_sf)["ymin"] - 50000,
+             st_bbox(roi3_sf)["ymax"] + 50000),
+    expand = FALSE
+  ) +
+
+  theme_minimal(base_size = 14) +
+  
+  theme(
+    panel.grid = element_blank(),
+    axis.text  = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold")
+  ) +
+  
+  labs(
+    title = "Biodiversity Indicators",
+    subtitle = "Grassland Area (Grey)"
+  )
+
+indicators_plot <- last_plot()
+
+```
+
+
+Eco-district plots
+```{r}
+# Make chlorpleth maps of ecodistricts
+
+# Convert ecodistrict polygons to sf
+eco_sf <- st_as_sf(eco_dist)
+
+# Join indicator summary to polygons
+eco_ind_sf <- eco_sf %>%
+  left_join(
+    ind_ecodist,
+    by = c("ECODISTRIC" = "ECODISTRIC")
+  )
+
+indicator_labs <- c(
+  "1" = "KBAs",
+  "2" = "KBAs (draft)",
+  "3" = "ECCC for SAR",
+  "4" = "ECCC Comm Nom"
+)
+
+indicator_cols <- c(
+  "1" = "#4477AA",  # blue
+  "2" = "#228833",  # green
+  "3" = "#CCBB44",  # yellow
+  "4" = "#AA3377"   # pink
+)
+
+eco_ind_sf$indicator_f <- factor(
+  eco_ind_sf$indicator_id,
+  levels = names(indicator_labs),
+  labels = indicator_labs
+)
+
+
+eco_sf <- st_as_sf(eco_dist)
+
+eco_ind_complete <- eco_sf %>%
+  left_join(
+    ind_ecodist,
+    by = "ECODISTRIC"
+  ) %>%
+  mutate(
+    ha = ifelse(is.na(ha), 0, ha)
+  )
+
+```
+
+```{r}
+
+make_indicator_map <- function(ind_id, base_col, title_txt) {
+
+  ind_dat <- eco_ind_complete[
+    eco_ind_complete$indicator_id == ind_id,
+  ]
+
+  ggplot() +
+
+    geom_sf(
+      data = ind_dat,
+      aes(fill = ha),
+      color = NA
+    ) +
+
+    geom_sf(
+      data = eco_sf,
+      fill = NA,
+      color = "grey70",
+      linewidth = 0.2
+    ) +
+    
+    geom_sf(
+      data = roi3_sf,
+      fill = NA,
+      color = "red",
+      linewidth = 0.2
+    ) +
+
+    
+    scale_fill_gradientn(
+      colours = c(
+        "#F2F2F2",        # light neutral grey (zero)
+        base_col
+      ),
+      values = c(0, 1),
+      labels = scales::comma,
+      name = paste0(title_txt, " area (ha)"),
+      guide = guide_colorbar(
+        barwidth  = unit(10, "cm"),
+        barheight = unit(0.6, "cm"),
+        title.position = "top",
+        label.position = "bottom"
+      )
+    ) +
+
+    coord_sf(expand = FALSE) +
+
+    theme_minimal(base_size = 12) +
+    theme(
+      panel.grid   = element_blank(),
+      axis.text    = element_blank(),
+      axis.title   = element_blank(),
+      axis.ticks   = element_blank(),
+      legend.position = "bottom",
+      legend.title = element_text(face = "bold")
+    )
+}
+
+
+
+
+map_kba <- make_indicator_map(
+  ind_id   = 1,
+  base_col = "#4477AA",
+  title_txt = "KBAs"
+)
+
+map_kba_draft <- make_indicator_map(
+  ind_id   = 2,
+  base_col = "#228833",
+  title_txt = "KBAs (draft)"
+)
+
+map_sar <- make_indicator_map(
+  ind_id   = 3,
+  base_col = "#CCBB44",
+  title_txt = "ECCC for SAR"
+)
+
+map_comm <- make_indicator_map(
+  ind_id   = 4,
+  base_col = "#AA3377",
+  title_txt = "ECCC Comm Nom"
+)
+
+library(patchwork)
+
+combined_ecodist_plot <-
+  (map_kba | map_kba_draft) /
+  (map_sar | map_comm) +
+  plot_annotation(
+    title = "Indicator Coverage by Eco‑District",
+    subtitle = "Total indicator area (hectares)",
+    theme = theme(
+      plot.title = element_text(face = "bold", size = 16)
+    )
+  )
+
+combined_ecodist_plot
+```
+
+Save plots
+```{r}
+
+fig_width  <- 13.33  # inches (16:9 slide)
+fig_height <- 7.5
+fig_dpi    <- 300
+
+bucket_name <- "sagemaker-gst-stage.sharing"
+
+grassland_obj  <- "ciara-hovis/TomoPrairie/figures/Baseline_grassland.png"
+indicators_obj <- "ciara-hovis/TomoPrairie/figures/Indicators_study_area.png"
+ecodist_ind_obj <- "ciara-hovis/TomoPrairie/figures/Indicators_ecodist.png"
+
+grassland_file <- tempfile(fileext = ".png")
+indicators_file <- tempfile(fileext = ".png")
+ecodist_ind_file <- tempfile(fileext = ".png")
+
+ggsave(
+  filename = grassland_file,
+  plot     = grassland_plot,
+  width    = fig_width,
+  height   = fig_height,
+  units    = "in",
+  dpi      = fig_dpi,
+  bg       = "white"
+)
+ggsave(
+  filename = indicators_file,
+  plot     = indicators_plot,
+  width    = fig_width,
+  height   = fig_height,
+  units    = "in",
+  dpi      = fig_dpi,
+  bg       = "white"
+)
+ggsave(
+  filename = ecodist_ind_file,
+  plot     = combined_ecodist_plot,
+  width    = fig_width,
+  height   = fig_height,
+  units    = "in",
+  dpi      = fig_dpi,
+  bg       = "white"
+)
+
+put_object(
+  file   = grassland_file,
+  bucket = bucket_name,
+  object = grassland_obj
+)
+put_object(
+  file   = indicators_file,
+  bucket = bucket_name,
+  object = indicators_obj
+)
+put_object(
+  file   = ecodist_ind_file,
+  bucket = bucket_name,
+  object = ecodist_ind_obj
+)
+
+```
+
+
+

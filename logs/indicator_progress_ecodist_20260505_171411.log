@@ -1,0 +1,10 @@
+[2026-05-05 17:14:11] Starting indicator calculation (per ecodistrict)
+[2026-05-05 17:14:11] Number of vectors: 6
+[2026-05-05 17:14:11] Number of ecodistricts: 195
+[2026-05-05 17:14:11] CRS check passed for raster and vectors
+[2026-05-05 17:14:12] Loaded cached ecodistrict raster
+[2026-05-05 17:14:12] Indicator 1: started
+[2026-05-05 17:51:20] Indicator 1: 52 ecodistricts with data; total pixels = 12,664,563
+[2026-05-05 17:51:20] Indicator 1: pixel range = [0, 4054571]
+[2026-05-05 17:51:20] Indicator 1: finished in 37.15 minutes
+[2026-05-05 17:51:20] Indicator 2: started

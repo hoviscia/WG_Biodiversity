@@ -1,0 +1,20 @@
+[2026-05-01 16:11:12] Starting indicator calculation
+[2026-05-01 16:11:12] Number of vectors: 4
+[2026-05-01 16:11:12] Indicator 1: started
+[2026-05-01 16:11:12] Indicator 1: dissolved to 1 feature(s)
+[2026-05-01 16:14:16] Indicator 1: pixel count = 13333408
+[2026-05-01 16:14:16] Indicator 1: finished
+[2026-05-01 16:14:16] Indicator 2: started
+[2026-05-01 16:14:17] Indicator 2: dissolved to 1 feature(s)
+[2026-05-01 16:16:54] Indicator 2: pixel count = 7403359
+[2026-05-01 16:16:54] Indicator 2: finished
+[2026-05-01 16:16:54] Indicator 3: started
+[2026-05-01 16:16:54] Indicator 3: dissolved to 1 feature(s)
+[2026-05-01 16:22:03] Indicator 3: pixel count = 41239233
+[2026-05-01 16:22:03] Indicator 3: finished
+[2026-05-01 16:22:03] Indicator 4: started
+[2026-05-01 16:22:03] Indicator 4: dissolved to 1 feature(s)
+[2026-05-01 16:24:46] Indicator 4: pixel count = 8026825
+[2026-05-01 16:24:46] Indicator 4: finished
+[2026-05-01 16:24:46] Indicator calculation completed
+[2026-05-01 16:24:46] Saved indicators_studyarea_pixel_counts.csv to S3

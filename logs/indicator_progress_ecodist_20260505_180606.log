@@ -1,0 +1,24 @@
+[2026-05-05 18:06:06] Starting indicator calculation (per ecodistrict)
+[2026-05-05 18:06:06] Number of vectors: 4
+[2026-05-05 18:06:06] Number of ecodistricts: 195
+[2026-05-05 18:06:06] CRS check passed for raster and vectors
+[2026-05-05 18:06:06] Loaded cached ecodistrict raster
+[2026-05-05 18:06:06] Indicator 1: started
+[2026-05-05 18:43:32] Indicator 1: 52 ecodistricts with data; total pixels = 12,664,563
+[2026-05-05 18:43:32] Indicator 1: pixel range = [0, 4054571]
+[2026-05-05 18:43:32] Indicator 1: finished in 37.42 minutes
+[2026-05-05 18:43:32] Indicator 2: started
+[2026-05-05 19:21:25] Indicator 2: 44 ecodistricts with data; total pixels = 7,102,506
+[2026-05-05 19:21:25] Indicator 2: pixel range = [16, 2860219]
+[2026-05-05 19:21:25] Indicator 2: finished in 37.89 minutes
+[2026-05-05 19:21:25] Indicator 3: started
+[2026-05-05 19:59:21] Indicator 3: 46 ecodistricts with data; total pixels = 39,562,717
+[2026-05-05 19:59:21] Indicator 3: pixel range = [0, 5486199]
+[2026-05-05 19:59:21] Indicator 3: finished in 37.93 minutes
+[2026-05-05 19:59:21] Indicator 4: started
+[2026-05-05 20:37:09] Indicator 4: 23 ecodistricts with data; total pixels = 7,695,749
+[2026-05-05 20:37:09] Indicator 4: pixel range = [0, 2365383]
+[2026-05-05 20:37:09] Indicator 4: finished in 37.81 minutes
+[2026-05-05 20:37:09] Tabular indicator calculation completed
+[2026-05-05 20:37:09] Final table created: 165 rows, 4 indicators
+[2026-05-05 20:37:10] Saved indicators_ecodistrict_pixel_counts.csv to S3

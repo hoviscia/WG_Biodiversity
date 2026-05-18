@@ -19,7 +19,10 @@ library(dplyr)
 library(tigris)
 library(sf)
 
-# define directories
+# Authenticate aws
+source(here::here('aws_cred.R'))
+
+# Define directories
 dir <- here()
 dat.dir <- file.path(dir, "data", "raw")
 roi.dir <- file.path(dir, "data", "studyarea")

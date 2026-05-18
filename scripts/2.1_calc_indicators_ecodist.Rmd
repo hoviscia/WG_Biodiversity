@@ -1,0 +1,332 @@
+---
+title: "Calculate Indicators"
+output: # html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+# R Set-up
+
+```{r}
+# Clear workspace
+rm(list = ls())
+
+# Libraries 
+library(terra)
+library(here)
+library(purrr)
+library(dplyr)
+library(tigris)
+library(sf)
+library(aws.s3)
+
+# Authenticate aws
+source(here::here('aws_cred.R'))
+
+# Base S3 location (GDAL-style path)
+s3_base <- "/vsis3/sagemaker-gst-stage.sharing/ciara-hovis/TomoPrairie/bd_data"
+
+dat.dir <- file.path(s3_base, "raw")
+roi.dir <- file.path(s3_base, "studyarea")
+dum.dir <- file.path(s3_base, "dummy")
+ind.dir <- file.path(s3_base, "indicators")
+
+```
+
+# Data
+
+## 0.1 Indicator Data
+
+Load in the wrangled vector data for each indicator. 
+
+```{r}
+# Find matching GeoPackage files
+objs <- get_bucket(
+  bucket = "sagemaker-gst-stage.sharing",
+  prefix = "ciara-hovis/TomoPrairie/bd_data/indicators/"
+)
+
+gpkg_files <- paste0(
+  "/vsis3/sagemaker-gst-stage.sharing/",
+  sapply(objs, `[[`, "Key")
+)
+
+gpkg_files <- gpkg_files[grepl("\\.gpkg$", gpkg_files)]
+vectors <- lapply(gpkg_files, vect)
+
+```
+
+
+## 0.2 Dummy Data
+
+```{r}
+dum_base <- rast(file.path(dum.dir, "eccc_reclass_reproj_algn_binary.tif"))
+dum_base <- rast(file.path(dum.dir, "gpw_reproj_algn_natseminat_noshrub_masked.tif"))
+dum_fut <- rast(file.path(dum.dir, "AAFC_LUTS_2020_5-classes.tif"))
+
+# plot(dum_base)
+# plot(dum_fut)
+```
+
+## 0.2 Eco-district Data
+```{r}
+# eco_dist$ECODISTRIC is ID column
+eco_dist <-  vect(file.path(roi.dir, "national-ecological-framework-for-canada", "Ecodistricts",  "ecodistricts_clean_modelling-extent.shp"))
+
+# plot(eco_dist)
+
+# Census subdivision lookup table 
+eco_dist_lut <- terra::values(eco_dist) |>
+  dplyr::select(
+    ECODISTRIC,
+    ECOREGION_,
+    ECOZONE_ID
+  )
+
+lut_csv <- tempfile(fileext = ".csv")
+
+write.csv(
+  eco_dist_lut,
+  lut_csv,
+  row.names = FALSE
+)
+
+aws.s3::put_object(
+  file   = lut_csv,
+  bucket = "sagemaker-gst-stage.sharing",
+  object = "ciara-hovis/TomoPrairie/results/ecodistrict_lookup.csv"
+)
+
+```
+
+
+
+# Calc indicators
+
+```{r}
+# ---- Progress logging setup ----
+
+log_file <- here::here(
+  "logs",
+  paste0("indicator_progress_ecodist_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".log")
+)
+
+dir.create(dirname(log_file), showWarnings = FALSE, recursive = TRUE)
+
+log_msg <- function(msg) {
+  timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+  cat(sprintf("[%s] %s\n", timestamp, msg),
+      file = log_file,
+      append = TRUE)
+}
+
+log_msg("Starting indicator calculation (per ecodistrict)")
+log_msg(paste("Number of vectors:", length(vectors)))
+log_msg(paste("Number of ecodistricts:", nrow(eco_dist)))
+```
+
+```{r}
+# ---- Sanity checks ----
+stopifnot(
+  same.crs(dum_base, eco_dist),
+  same.crs(dum_base, vectors[[1]])
+)
+
+
+log_msg("CRS check passed for raster and vectors")
+
+```
+
+```{r}
+# ---- Cache ecodistrict raster ----
+tmp_dir <- "/home/sagemaker-user/WG_Biodiversity/tmp_data"
+dir.create(tmp_dir, showWarnings = FALSE, recursive = TRUE)
+
+eco_rast_file <- file.path(tmp_dir, "eco_dist_rast.tif")
+
+if (file.exists(eco_rast_file)) {
+
+  eco_rast <- rast(eco_rast_file)
+  log_msg("Loaded cached ecodistrict raster")
+
+} else {
+
+  eco_rast <- rasterize(
+    eco_dist,
+    dum_base,
+    field = "ECODISTRIC",
+    background = NA
+  )
+
+  writeRaster(
+    eco_rast,
+    eco_rast_file,
+    overwrite = TRUE
+  )
+
+  log_msg("Ecodistrict raster created and saved locally")
+}
+
+```
+
+
+```{r, eval=F}
+# temp testing code
+i <- 1
+v <- vectors[[i]]
+v_one <- aggregate(v)
+
+
+ind_mask <- rasterize(
+  v_one,
+  dum_base,
+  field = 1,
+  background = NA
+)
+global(ind_mask, "sum", na.rm = TRUE)
+
+dum_masked <- mask(dum_base, ind_mask)
+global(dum_masked, "sum", na.rm = TRUE)
+
+
+eco_masked <- mask(eco_rast, ind_mask)
+
+dum_in_ecos <- mask(dum_masked, eco_masked)
+
+global(dum_in_ecos, "sum", na.rm = TRUE)
+
+
+```
+
+
+
+```{r}
+terraOptions(cores = parallel::detectCores())
+terraOptions(memfrac = 0.6, progress = 0)
+
+# Progress bar (once, before loop)
+pb <- txtProgressBar(
+  min = 0,
+  max = length(vectors),
+  style = 3
+)
+
+results <- vector("list", length(vectors))
+
+for (i in seq_along(vectors)) {
+
+  t0 <- Sys.time()
+  log_msg(sprintf("Indicator %d: started", i))
+
+  v <- vectors[[i]]
+
+  res <- tryCatch({
+
+    # Dissolve indicator once
+    v_one <- aggregate(v)
+
+    # Rasterize indicator geometry to dummy raster grid
+    ind_mask <- rasterize(
+      v_one,
+      dum_base,
+      field = 1,
+      background = NA
+      )
+
+    # Mask ecodistrict raster to indicator footprint
+    dum_masked <- mask(dum_base, ind_mask)
+    eco_masked <- mask(eco_rast, ind_mask)   
+    
+    # Zonal sum (single raster pass)
+    
+    zonal_tbl <- as.data.frame(
+      zonal(dum_masked, eco_masked, fun = "sum", na.rm = TRUE)
+    )
+    
+    colnames(zonal_tbl) <- c("ECODISTRIC", "pixel_ones")
+    
+    zonal_tbl$pixel_ones <- ifelse(
+      is.finite(zonal_tbl$pixel_ones),
+      zonal_tbl$pixel_ones,
+      0
+    )
+
+    zonal_tbl <- zonal_tbl[!is.na(zonal_tbl$ECODISTRIC), ]
+
+    
+    log_msg(sprintf(
+      "Indicator %d: %d ecodistricts with data; total pixels = %s",
+      i,
+      nrow(zonal_tbl),
+      format(sum(zonal_tbl$pixel_ones, na.rm = TRUE), big.mark = ",")
+    ))
+    
+    
+    log_msg(sprintf(
+      "Indicator %d: pixel range = [%s, %s]",
+      i,
+      min(zonal_tbl$pixel_ones, na.rm = TRUE),
+      max(zonal_tbl$pixel_ones, na.rm = TRUE)
+    ))
+
+
+    zonal_tbl$indicator_id <- i
+
+    zonal_tbl
+
+  }, error = function(e) {
+
+    log_msg(sprintf(
+      "Indicator %d: ERROR - %s",
+      i, e$message
+    ))
+
+    NULL
+  })
+
+  results[[i]] <- res
+
+  # Update progress bar
+  setTxtProgressBar(pb, i)
+
+  log_msg(sprintf(
+    "Indicator %d: finished in %0.2f minutes",
+    i,
+    as.numeric(difftime(Sys.time(), t0, units = "mins"))
+  ))
+}
+
+close(pb)
+
+log_msg("Tabular indicator calculation completed")
+```
+
+```{r}
+indicators_ecodistrict_df <- dplyr::bind_rows(results)
+log_msg(sprintf(
+  "Final table created: %d rows, %d indicators",
+  nrow(indicators_ecodistrict_df),
+  length(unique(indicators_ecodistrict_df$indicator_id))
+))
+```
+
+```{r}
+# Local temp CSV
+tmp_csv <- tempfile(fileext = ".csv")
+
+write.csv(
+  indicators_ecodistrict_df,
+  tmp_csv,
+  row.names = FALSE
+)
+
+# Upload to S3
+aws.s3::put_object(
+  file   = tmp_csv,
+  bucket = "sagemaker-gst-stage.sharing",
+  object = "ciara-hovis/TomoPrairie/results/indicators_ecodistrict_pixel_counts2.csv"
+)
+
+log_msg("Saved indicators_ecodistrict_pixel_counts.csv to S3")
+```
+

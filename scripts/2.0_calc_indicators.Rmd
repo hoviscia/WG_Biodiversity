@@ -1,0 +1,187 @@
+---
+title: "Calculate Indicators"
+output: # html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+# R Set-up
+
+```{r}
+# Clear workspace
+rm(list = ls())
+
+# Libraries 
+library(terra)
+library(here)
+library(purrr)
+library(dplyr)
+library(tigris)
+library(sf)
+library(aws.s3)
+
+# Authenticate aws
+source(here::here('aws_cred.R'))
+
+# Base S3 location (GDAL-style path)
+s3_base <- "/vsis3/sagemaker-gst-stage.sharing/ciara-hovis/TomoPrairie/bd_data"
+
+dat.dir <- file.path(s3_base, "raw")
+roi.dir <- file.path(s3_base, "studyarea")
+dum.dir <- file.path(s3_base, "dummy")
+ind.dir <- file.path(s3_base, "indicators")
+
+```
+
+# Data
+
+## 0.1 Indicator Data
+```{r}
+# Find matching GeoPackage files
+objs <- get_bucket(
+  bucket = "sagemaker-gst-stage.sharing",
+  prefix = "ciara-hovis/TomoPrairie/bd_data/indicators/"
+)
+
+gpkg_files <- paste0(
+  "/vsis3/sagemaker-gst-stage.sharing/",
+  sapply(objs, `[[`, "Key")
+)
+
+gpkg_files <- gpkg_files[grepl("\\.gpkg$", gpkg_files)]
+
+vectors <- lapply(gpkg_files, vect)
+
+```
+
+
+## 0.2 Dummy Data
+
+```{r}
+dum_base <- rast(file.path(dum.dir, "eccc_reclass_reproj_algn_binary.tif"))
+dum_base <- rast(file.path(dum.dir, "gpw_reproj_algn_natseminat_noshrub_masked.tif"))
+dum_fut <- rast(file.path(dum.dir, "AAFC_LUTS_2020_5-classes.tif"))
+
+# plot(dum_base)
+# plot(dum_fut)
+
+roi3 <- vect(file.path(roi.dir, "modelling_study_area_aligned_cnvc_Jan2026.shp"))
+
+```
+
+
+# Calc indicators
+
+```{r}
+# ---- Progress logging setup ----
+
+log_file <- here::here(
+  "logs",
+  paste0("indicator_progress_studyarea_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".log")
+)
+
+dir.create(dirname(log_file), showWarnings = FALSE, recursive = TRUE)
+
+log_msg <- function(msg) {
+  timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+  cat(sprintf("[%s] %s\n", timestamp, msg),
+      file = log_file,
+      append = TRUE)
+}
+
+log_msg("Starting indicator calculation")
+log_msg(paste("Number of vectors:", length(vectors)))
+```
+
+
+```{r}
+# Enable parallel processing inside terra
+terraOptions(cores = parallel::detectCores())
+
+pb <- txtProgressBar(min = 0, max = length(vectors), style = 3)
+
+results <- vector("list", length(vectors))
+
+for (i in seq_along(vectors)) {
+
+  v <- vectors[[i]]
+  log_msg(sprintf("Indicator %d: started", i))
+
+  res <- tryCatch({
+
+    # Dissolve all features into ONE polygon
+    v_one <- aggregate(v)
+
+    log_msg(sprintf(
+      "Indicator %d: dissolved to %d feature(s)",
+      i, nrow(v_one)
+    ))
+
+    # Count 1-valued pixels
+    pix_sum <- extract(
+      dum_base,
+      v_one,
+      fun = sum,
+      na.rm = TRUE
+    )
+
+    pix_val <- pix_sum[, 2]
+
+    log_msg(sprintf(
+      "Indicator %d: pixel count = %s",
+      i, pix_val
+    ))
+
+    # ✅ Return TABULAR result
+    data.frame(
+      indicator_id = i,
+      pixel_ones   = pix_val,
+      stringsAsFactors = FALSE
+    )
+
+  }, error = function(e) {
+
+    log_msg(sprintf(
+      "Indicator %d: ERROR - %s",
+      i, e$message
+    ))
+
+    NULL
+  })
+
+  results[[i]] <- res
+  setTxtProgressBar(pb, i)
+  log_msg(sprintf("Indicator %d: finished", i))
+}
+
+close(pb)
+
+log_msg("Indicator calculation completed")
+
+```
+
+```{r}
+indicators_studyarea_df <- dplyr::bind_rows(results)
+```
+
+
+```{r}
+# Write local temp CSV
+tmp_csv <- tempfile(fileext = ".csv")
+
+write.csv(
+  indicators_studyarea_df,
+  tmp_csv,
+  row.names = FALSE
+)
+
+# Upload to S3
+aws.s3::put_object(
+  file   = tmp_csv,
+  bucket = "sagemaker-gst-stage.sharing",
+  object = "ciara-hovis/TomoPrairie/results/indicators_studyarea_pixel_counts2.csv"
+)
+
+log_msg("Saved indicators_studyarea_pixel_counts.csv to S3")
+```
+

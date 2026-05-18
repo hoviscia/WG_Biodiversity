@@ -5,3 +5,5 @@
 
 # Do not sync data
 data/
+tmp_data/
+tmp_data/

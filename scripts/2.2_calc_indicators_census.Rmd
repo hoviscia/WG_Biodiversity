@@ -1,0 +1,293 @@
+---
+title: "Calculate Indicators"
+output: # html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+# R Set-up
+
+```{r}
+# Clear workspace
+rm(list = ls())
+
+# Libraries 
+library(terra)
+library(here)
+library(purrr)
+library(dplyr)
+library(tigris)
+library(sf)
+library(aws.s3)
+
+# Authenticate aws
+source(here::here('aws_cred.R'))
+
+# Base S3 location (GDAL-style path)
+s3_base <- "/vsis3/sagemaker-gst-stage.sharing/ciara-hovis/TomoPrairie/bd_data"
+
+dat.dir <- file.path(s3_base, "raw")
+roi.dir <- file.path(s3_base, "studyarea")
+dum.dir <- file.path(s3_base, "dummy")
+ind.dir <- file.path(s3_base, "indicators")
+
+```
+
+# Data
+
+## 0.1 Indicator Data
+
+Load in the wrangled vector data for each indicator. 
+
+```{r}
+# Find matching GeoPackage files
+objs <- get_bucket(
+  bucket = "sagemaker-gst-stage.sharing",
+  prefix = "ciara-hovis/TomoPrairie/bd_data/indicators/"
+)
+
+gpkg_files <- paste0(
+  "/vsis3/sagemaker-gst-stage.sharing/",
+  sapply(objs, `[[`, "Key")
+)
+
+gpkg_files <- gpkg_files[grepl("\\.gpkg$", gpkg_files)]
+vectors <- lapply(gpkg_files, vect)
+
+```
+
+
+## 0.2 Dummy Data
+
+```{r}
+dum_base <- rast(file.path(dum.dir, "eccc_reclass_reproj_algn_binary.tif"))
+dum_base <- rast(file.path(dum.dir, "gpw_reproj_algn_natseminat_noshrub_masked.tif"))
+dum_fut <- rast(file.path(dum.dir, "AAFC_LUTS_2020_5-classes.tif"))
+
+# plot(dum_base)
+# plot(dum_fut)
+```
+
+## 0.2 Census subdivision Data
+```{r}
+# cen_sub$CDUID is ID column
+cen_sub <-  vect(file.path(roi.dir, "census-subdivisions", "lcsd000a25a_e_modelling-extent.shp"))
+
+# plot(cen_sub)
+
+# Census subdivision lookup table 
+cen_sub_lut <- terra::values(cen_sub) |>
+  dplyr::select(
+    CDUID,
+    PRUID,
+    PRNAME,
+    CSDNAME
+  )
+
+
+lut_csv <- tempfile(fileext = ".csv")
+
+write.csv(
+  cen_sub_lut,
+  lut_csv,
+  row.names = FALSE
+)
+
+aws.s3::put_object(
+  file   = lut_csv,
+  bucket = "sagemaker-gst-stage.sharing",
+  object = "ciara-hovis/TomoPrairie/results/census_subdivision_lookup.csv"
+)
+```
+
+
+
+# Calc indicators
+
+```{r}
+# ---- Progress logging setup ----
+
+log_file <- here::here(
+  "logs",
+  paste0("indicator_progress_cen_sub_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".log")
+)
+
+dir.create(dirname(log_file), showWarnings = FALSE, recursive = TRUE)
+
+log_msg <- function(msg) {
+  timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+  cat(sprintf("[%s] %s\n", timestamp, msg),
+      file = log_file,
+      append = TRUE)
+}
+
+log_msg("Starting indicator calculation (per census subdiv)")
+log_msg(paste("Number of vectors:", length(vectors)))
+log_msg(paste("Number of census subdivs:", nrow(cen_sub)))
+```
+
+```{r}
+# ---- Sanity checks ----
+stopifnot(
+  same.crs(dum_base, cen_sub),
+  same.crs(dum_base, vectors[[1]])
+)
+
+
+log_msg("CRS check passed for raster and vectors")
+
+```
+
+```{r}
+# ---- Cache census subdiv raster ----
+tmp_dir <- "/home/sagemaker-user/WG_Biodiversity/tmp_data"
+dir.create(tmp_dir, showWarnings = FALSE, recursive = TRUE)
+
+cen_rast_file <- file.path(tmp_dir, "cen_sub_rast.tif")
+
+if (file.exists(cen_rast_file)) {
+
+  cen_rast <- rast(cen_rast_file)
+  log_msg("Loaded cached census subdiv raster")
+
+} else {
+
+  cen_rast <- rasterize(
+    cen_sub,
+    dum_base,
+    field = "CDUID",
+    background = NA
+  )
+
+  writeRaster(
+    cen_rast,
+    cen_rast_file,
+    overwrite = TRUE
+  )
+
+  log_msg("census subdiv raster created and saved locally")
+}
+```
+
+
+
+```{r}
+terraOptions(cores = parallel::detectCores())
+
+# Progress bar (once, before loop)
+pb <- txtProgressBar(
+  min = 0,
+  max = length(vectors),
+  style = 3
+)
+
+results <- vector("list", length(vectors))
+
+for (i in seq_along(vectors)) {
+
+  t0 <- Sys.time()
+  log_msg(sprintf("Indicator %d: started", i))
+
+  v <- vectors[[i]]
+
+  res <- tryCatch({
+
+    # Dissolve indicator once
+    v_one <- aggregate(v)
+
+    # Rasterize indicator geometry to dummy raster grid
+    ind_mask <- rasterize(
+      v_one,
+      dum_base,
+      field = 1,
+      background = NA
+      )
+
+    # Mask census subdiv raster to indicator footprint
+    dum_masked <- mask(dum_base, ind_mask)
+    cen_masked <- mask(cen_rast, ind_mask)   
+    
+    # Zonal sum (single raster pass)
+    zonal_tbl <- as.data.frame(
+      zonal(dum_masked, cen_masked, fun = "sum", na.rm = TRUE)
+      )
+
+
+    colnames(zonal_tbl) <- c("CDUID", "pixel_ones")
+    
+    zonal_tbl <- zonal_tbl[!is.na(zonal_tbl$CDUID), ]
+    
+    log_msg(sprintf(
+      "Indicator %d: %d census subdivs with data; total pixels = %s",
+      i,
+      nrow(zonal_tbl),
+      format(sum(zonal_tbl$pixel_ones, na.rm = TRUE), big.mark = ",")
+    ))
+    
+    log_msg(sprintf(
+      "Indicator %d: pixel range = [%s, %s]",
+      i,
+      format(min(zonal_tbl$pixel_ones), big.mark = ","),
+      format(max(zonal_tbl$pixel_ones), big.mark = ",")
+      ))
+
+    zonal_tbl$indicator_id <- i
+
+    zonal_tbl
+
+  }, error = function(e) {
+
+    log_msg(sprintf(
+      "Indicator %d: ERROR - %s",
+      i, e$message
+    ))
+
+    NULL
+  })
+
+  results[[i]] <- res
+
+  # Update progress bar
+  setTxtProgressBar(pb, i)
+
+  log_msg(sprintf(
+    "Indicator %d: finished in %0.2f minutes",
+    i,
+    as.numeric(difftime(Sys.time(), t0, units = "mins"))
+  ))
+}
+
+close(pb)
+
+log_msg("Tabular indicator calculation completed")
+```
+
+```{r}
+indicators_census_subdiv_df <- dplyr::bind_rows(results)
+log_msg(sprintf(
+  "Final table created: %d rows, %d indicators",
+  nrow(indicators_census_subdiv_df),
+  length(unique(indicators_census_subdiv_df$indicator_id))
+))
+```
+
+```{r}
+# Local temp CSV
+tmp_csv <- tempfile(fileext = ".csv")
+
+write.csv(
+  indicators_census_subdiv_df,
+  tmp_csv,
+  row.names = FALSE
+)
+
+# Upload to S3
+aws.s3::put_object(
+  file   = tmp_csv,
+  bucket = "sagemaker-gst-stage.sharing",
+  object = "ciara-hovis/TomoPrairie/results/indicators_census_subdiv_pixel_counts.csv"
+)
+
+log_msg("Saved indicators_census_subdiv_pixel_counts.csv to S3")
+```
+

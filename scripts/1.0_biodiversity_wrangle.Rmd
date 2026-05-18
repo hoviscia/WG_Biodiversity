@@ -168,6 +168,7 @@ prot_area <- st_read(
 )
 
 
+
 # --- Keep polygon geometries only and convert to terra ---
 prot_area_vect <- vect(
   prot_area[st_geometry_type(prot_area) %in% c("POLYGON", "MULTIPOLYGON"), ]

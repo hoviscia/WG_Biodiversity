@@ -136,8 +136,8 @@ log_msg(paste("Number of ecodistricts:", nrow(eco_dist)))
 ```{r}
 # ---- Sanity checks ----
 stopifnot(
-  crs(dum_base) == crs(eco_dist),
-  all(sapply(indicator_tbl$vector, function(v) crs(dum_base) == crs(v)))
+  same.crs(dum_base, eco_dist),
+  all(sapply(indicator_tbl$vector, function(v) same.crs(dum_base, v)))
   )
 
 

@@ -128,7 +128,7 @@ log_msg <- function(msg) {
 }
 
 log_msg("Starting indicator calculation (per census subdiv)")
-log_msg(paste("Number of vectors:", length(vectors)))
+log_msg(paste("Number of vectors:", nrow(indicator_tbl)))
 log_msg(paste("Number of census subdivs:", nrow(cen_sub)))
 ```
 
@@ -136,7 +136,7 @@ log_msg(paste("Number of census subdivs:", nrow(cen_sub)))
 # ---- Sanity checks ----
 stopifnot(
   same.crs(dum_base, cen_sub),
-  all(sapply(vectors, function(v) same.crs(dum_base, v)))
+  all(sapply(indicator_tbl$vector, function(v) same.crs(dum_base, v)))
 )
 
 
@@ -183,11 +183,11 @@ terraOptions(cores = parallel::detectCores())
 # Progress bar (once, before loop)
 pb <- txtProgressBar(
   min = 0,
-  max = length(vectors),
+  max = nrow(indicator_tbl),
   style = 3
 )
 
-results <- vector("list", length(vectors))
+results <- vector("list", nrow(indicator_tbl))
 
 
 for (i in seq_len(nrow(indicator_tbl))) {
@@ -238,7 +238,7 @@ for (i in seq_len(nrow(indicator_tbl))) {
       format(max(zonal_tbl$pixel_ones), big.mark = ",")
       ))
 
-    zonal_tbl$indicator_id <- indicator_ids[i]i
+    zonal_tbl$indicator_id <- indicator_tbl$indicator_id[i]
 
     zonal_tbl
 

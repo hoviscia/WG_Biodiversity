@@ -389,13 +389,11 @@ farm_R <- vect(farm_R)
 farm_F <- project(farm_F, roi3)
 farm_R <- project(farm_R, roi3)
 
-# Extract areas of high and very high capacity
-# WHC_R/F_00_20_CHG_CLASS
-# Large dec = 5
-# Mod dec = 4
-
-farm_F_chng <- farm_F[farm_F$WHC_F_2020_CLASS >= 4, ]
-farm_R_chng <- farm_R[farm_R$WHC_R_2020_CLASS >= 4, ]
+# Extract areas with large or moderate decline
+# Intended column: WHC_F_00_20_CHG_CLASS / WHC_R_00_20_CHG_CLASS
+# Large dec = 5, Mod dec = 4
+farm_F_chng <- farm_F[farm_F$WHC_F_00_20_CHG_CLASS >= 4, ]
+farm_R_chng <- farm_R[farm_R$WHC_R_00_20_CHG_CLASS >= 4, ]
 
 # clean-up
 rm(farm_path, farm_F, farm_R)
@@ -474,10 +472,9 @@ native_path <- file.path(dat.dir, "3_grass_condition", "3.2_native_grass", "cfga
 # Read in data
 native <- rast(native_path)
 
-# Crop 
+# Crop + mask
 roi3_native_crs <- project(roi3, crs(native))
-native <- crop(native, roi3_native_crs)
-native <- crop(native, roi3_native_crs)
+native <- crop(native, roi3_native_crs, mask = TRUE)
 
 # Convert to polygons
 native_smooth <- aggregate(native, fact = 2)
@@ -522,15 +519,18 @@ to_percentile <- function(r) {
 # calc percentiles
 conn_pct <- to_percentile(conn)
 
-# threshold at 80th percentile
+# threshold at 95th percentile
 conn_top <- conn_pct >= 0.95
 
+# Convert TRUE/FALSE → 1/NA (FALSE must be NA, not 0, or as.polygons() converts the entire extent)
+conn_bin <- ifel(conn_top, 1, NA)
+
 # convert to poly
-conn_top_smooth <- aggregate(conn_top, fact = 2)
+conn_top_smooth <- aggregate(conn_bin, fact = 2)
 conn_poly <- as.polygons(conn_top_smooth, dissolve = TRUE, na.rm = TRUE)
 
 # clean-up
-rm(conn_path, conn, conn_pct, conn_top, conn_top_smooth)
+rm(conn_path, conn, conn_pct, conn_top, conn_bin, conn_top_smooth)
 gc()
 
 ```

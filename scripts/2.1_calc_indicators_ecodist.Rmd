@@ -52,7 +52,15 @@ gpkg_files <- paste0(
 )
 
 gpkg_files <- gpkg_files[grepl("\\.gpkg$", gpkg_files)]
-vectors <- lapply(gpkg_files, vect)
+
+
+indicator_tbl <- data.frame(
+  file = gpkg_files,
+  indicator_id = sub("^ind_(.*)\\.gpkg$", "\\1", basename(gpkg_files))
+)
+
+indicator_tbl$vector <- lapply(indicator_tbl$file, vect)
+
 
 ```
 
@@ -121,16 +129,16 @@ log_msg <- function(msg) {
 }
 
 log_msg("Starting indicator calculation (per ecodistrict)")
-log_msg(paste("Number of vectors:", length(vectors)))
+log_msg(paste("Number of vectors:", nrow(indicator_tbl)))
 log_msg(paste("Number of ecodistricts:", nrow(eco_dist)))
 ```
 
 ```{r}
 # ---- Sanity checks ----
 stopifnot(
-  same.crs(dum_base, eco_dist),
-  same.crs(dum_base, vectors[[1]])
-)
+  crs(dum_base) == crs(eco_dist),
+  all(sapply(indicator_tbl$vector, function(v) crs(dum_base) == crs(v)))
+  )
 
 
 log_msg("CRS check passed for raster and vectors")
@@ -170,35 +178,6 @@ if (file.exists(eco_rast_file)) {
 ```
 
 
-```{r, eval=F}
-# temp testing code
-i <- 1
-v <- vectors[[i]]
-v_one <- aggregate(v)
-
-
-ind_mask <- rasterize(
-  v_one,
-  dum_base,
-  field = 1,
-  background = NA
-)
-global(ind_mask, "sum", na.rm = TRUE)
-
-dum_masked <- mask(dum_base, ind_mask)
-global(dum_masked, "sum", na.rm = TRUE)
-
-
-eco_masked <- mask(eco_rast, ind_mask)
-
-dum_in_ecos <- mask(dum_masked, eco_masked)
-
-global(dum_in_ecos, "sum", na.rm = TRUE)
-
-
-```
-
-
 
 ```{r}
 terraOptions(cores = parallel::detectCores())
@@ -207,18 +186,19 @@ terraOptions(memfrac = 0.6, progress = 0)
 # Progress bar (once, before loop)
 pb <- txtProgressBar(
   min = 0,
-  max = length(vectors),
+  max = nrow(indicator_tbl),
   style = 3
 )
 
-results <- vector("list", length(vectors))
+results <- vector("list", nrow(indicator_tbl))
 
-for (i in seq_along(vectors)) {
 
+for (i in seq_len(nrow(indicator_tbl))) {
+  id <- indicator_tbl$indicator_id[i]
+  v  <- indicator_tbl$vector[[i]]
+  
   t0 <- Sys.time()
   log_msg(sprintf("Indicator %d: started", i))
-
-  v <- vectors[[i]]
 
   res <- tryCatch({
 
@@ -270,8 +250,7 @@ for (i in seq_along(vectors)) {
     ))
 
 
-    zonal_tbl$indicator_id <- i
-
+    zonal_tbl$indicator_id <- indicator_tbl$indicator_id[i]
     zonal_tbl
 
   }, error = function(e) {

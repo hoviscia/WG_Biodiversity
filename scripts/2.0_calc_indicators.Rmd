@@ -50,7 +50,15 @@ gpkg_files <- paste0(
 
 gpkg_files <- gpkg_files[grepl("\\.gpkg$", gpkg_files)]
 
-vectors <- lapply(gpkg_files, vect)
+
+indicator_tbl <- data.frame(
+  file = gpkg_files,
+  indicator_id = sub("^ind_(.*)\\.gpkg$", "\\1", basename(gpkg_files)),
+  stringsAsFactors = FALSE
+)
+
+indicator_tbl$vector <- lapply(indicator_tbl$file, vect)
+
 
 ```
 
@@ -66,6 +74,13 @@ dum_fut <- rast(file.path(dum.dir, "AAFC_LUTS_2020_5-classes.tif"))
 # plot(dum_fut)
 
 roi3 <- vect(file.path(roi.dir, "modelling_study_area_aligned_cnvc_Jan2026.shp"))
+
+# Reproject baseline 
+dum_base <- if (file.exists("tmp_data/dum_base_projected.tif")) {
+  rast("tmp_data/dum_base_projected.tif")
+} else {
+  writeRaster(project(dum_base, roi3), "tmp_data/dum_base_projected.tif", overwrite = TRUE)
+}
 
 ```
 
@@ -90,7 +105,7 @@ log_msg <- function(msg) {
 }
 
 log_msg("Starting indicator calculation")
-log_msg(paste("Number of vectors:", length(vectors)))
+log_msg(paste("Number of vectors:", nrow(indicator_tbl)))
 ```
 
 
@@ -98,43 +113,42 @@ log_msg(paste("Number of vectors:", length(vectors)))
 # Enable parallel processing inside terra
 terraOptions(cores = parallel::detectCores())
 
-pb <- txtProgressBar(min = 0, max = length(vectors), style = 3)
+pb <- txtProgressBar(min = 0, max = nrow(indicator_tbl), style = 3)
 
-results <- vector("list", length(vectors))
+results <- vector("list", nrow(indicator_tbl))
 
-for (i in seq_along(vectors)) {
+for (i in seq_len(nrow(indicator_tbl))) {
+  id <- indicator_tbl$indicator_id[i]
+  v  <- indicator_tbl$vector[[i]]
 
-  v <- vectors[[i]]
-  log_msg(sprintf("Indicator %d: started", i))
+
+  log_msg(sprintf("Indicator %s: started", id))
 
   res <- tryCatch({
-
-    # Dissolve all features into ONE polygon
-    v_one <- aggregate(v)
-
+    
+    v_one <- terra::union(v)
+    
     log_msg(sprintf(
-      "Indicator %d: dissolved to %d feature(s)",
-      i, nrow(v_one)
+      "Indicator %s: dissolved to %d feature(s)",
+      id, nrow(v_one)
     ))
 
-    # Count 1-valued pixels
     pix_sum <- extract(
       dum_base,
       v_one,
       fun = sum,
       na.rm = TRUE
     )
-
-    pix_val <- pix_sum[, 2]
-
+    
+    pix_val <- pix_sum[, 2, drop = TRUE]
+   
     log_msg(sprintf(
-      "Indicator %d: pixel count = %s",
-      i, pix_val
+      "Indicator %s: pixel count = %s",
+      id, pix_val
     ))
 
-    # ✅ Return TABULAR result
     data.frame(
-      indicator_id = i,
+      indicator_id = id,
       pixel_ones   = pix_val,
       stringsAsFactors = FALSE
     )
@@ -142,8 +156,8 @@ for (i in seq_along(vectors)) {
   }, error = function(e) {
 
     log_msg(sprintf(
-      "Indicator %d: ERROR - %s",
-      i, e$message
+      "Indicator %s: ERROR - %s",
+      id, e$message
     ))
 
     NULL
@@ -151,7 +165,8 @@ for (i in seq_along(vectors)) {
 
   results[[i]] <- res
   setTxtProgressBar(pb, i)
-  log_msg(sprintf("Indicator %d: finished", i))
+
+  log_msg(sprintf("Indicator %s: finished", id))
 }
 
 close(pb)

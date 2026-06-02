@@ -1,0 +1,674 @@
+---
+title: "Biodiversity Indicators (v2 - 3.X as Rasters)"
+output: # html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+# R Set-up
+
+```{r}
+# Clear workspace
+rm(list = ls())
+
+# Libraries 
+library(terra)
+library(here)
+library(purrr)
+library(dplyr)
+library(tigris)
+library(sf)
+
+# Authenticate aws
+source(here::here('aws_cred.R'))
+
+# Base S3 location (GDAL-style path)
+s3_base <- "/vsis3/sagemaker-gst-stage.sharing/ciara-hovis/TomoPrairie/bd_data"
+
+dat.dir <- file.path(s3_base, "raw")
+roi.dir <- file.path(s3_base, "studyarea")
+dum.dir <- file.path(s3_base, "dummy")
+ind.dir <- file.path(s3_base, "indicators")
+tmp_dir <- "/home/sagemaker-user/WG_Biodiversity/tmp_data"
+
+# Define directories (OLD)
+# dir <- here()
+# dat.dir <- file.path(dir, "data", "raw")
+# roi.dir <- file.path(dir, "data", "studyarea")
+# dum.dir <- file.path(dir, "data", "dummy")
+```
+
+
+We developed biodiversity indicators in three categories:  Special Places, Species & Habitats, and Grassland Condition. 
+
+**VERSION 2 NOTE**: 3.X (Grassland Condition) indicators are now kept as rasters instead of converting to polygons.
+
+
+# 0.1 Study Area
+
+Load in the study areas. Will align all data to this crs.
+
+ROI 1 = TBD
+ROI 2 = Clip any data to this one
+ROI 3 = TBD
+
+```{r}
+
+roi1 <- vect(file.path(roi.dir, "class_study_area_aligned_cnvc_Dec2025.shp"))
+roi2 <- vect(file.path(roi.dir, "modelling_extent_aligned_cnvc_Jan2026.shp"))
+roi3 <- vect(file.path(roi.dir, "modelling_study_area_aligned_cnvc_Jan2026.shp"))
+
+# plot(roi1, main="roi1")
+# plot(roi2, main="roi2")
+# plot(roi3, main="roi3")
+
+```
+
+
+
+# 1.0 Special Places
+
+## 1.1 Key biodiversity areas
+
+Includes Accepted and draft KBAS => combine into one
+Check for data sensitivities
+
+```{r}
+# Define path to the geodatabase(s)
+kba_path <- file.path(dat.dir, "1_special_places", "1.1_KBAs", "AcceptedKBAs.gdb")
+kba_draft_path <- file.path(dat.dir, "1_special_places", "1.1_KBAs", "DRAFTKBAs.gdb")
+
+# List all layers in the geodatabase(s)
+st_layers(kba_path)
+st_layers(kba_draft_path)
+
+# Read the main feature class from the geodatabase(s)
+kba <- st_read(kba_path, layer = "KBASite")
+kba_draft <- st_read(kba_draft_path, layer = "DRAFT_KBASite")
+
+# Convert sf objects to terra SpatVector objects
+kba <- vect(kba)
+kba_draft <- vect(kba_draft)
+
+# Harmonize to Study Area CRS
+kba <- project(kba, roi3)
+kba_draft <- project(kba_draft, roi3)
+
+# clean-up
+rm(kba_path, kba_draft_path)
+gc()
+
+```
+
+## 1.2 ECCC priority places for species-at-risk (SAR)
+
+```{r}
+# Define path to the geodatabase(s)
+priority_path <- file.path(dat.dir, "1_special_places", "1.2_PriorityPlaces", "PriorityPlaces.gdb")
+
+# List all layers in the geodatabase(s)
+st_layers(priority_path)
+
+# Read the main feature class from the geodatabase(s)
+priority <- st_read(priority_path, layer = "PriorityPlacesBoundary")
+
+# Convert sf objects to terra SpatVector objects
+priority <- vect(priority)
+
+# Harmonize to Study Area CRS
+priority <- project(priority, roi3)
+
+# clean-up
+rm(priority_path)
+gc()
+
+```
+
+## 1.3 ECCC community nominated priority places
+
+```{r}
+# Define path to the geodatabase(s)
+comm_priority_path <- file.path(dat.dir, "1_special_places", "1.3_CommunityNominated_PriorityPlaces", "CommunityNominated_PriorityPlaces.gdb")
+
+# List all layers in the geodatabase(s)
+st_layers(comm_priority_path)
+
+# Read the main feature class from the geodatabase(s)
+comm_priority <- st_read(comm_priority_path, layer = "CommunityNominated_PriorityPlaces")
+
+# Convert sf objects to terra SpatVector objects
+comm_priority <- vect(comm_priority)
+
+# Harmonize to Study Area CRS
+comm_priority <- project(comm_priority, roi3)
+
+# clean-up
+rm(comm_priority_path)
+gc()
+
+```
+
+## 1.4 Relatively rare grasses
+
+Need protected area data & ecoregion(?) data
+```{r}
+# --- Load data ---
+eco_reg <- vect(file.path(
+  roi.dir,
+  "national-ecological-framework-for-canada",
+  "Ecoregions",
+  "ecoregions_clean_prairies.shp"
+))
+
+prot_area <- st_read(
+  file.path(
+    dat.dir,
+    "1_special_places",
+    "1.4_ProtectedAreas",
+    "ProtectedConservedArea_2025",
+    "ProtectedConservedArea_2025.gdb"
+  ),
+  layer = "ProtectedConservedArea_2025"
+)
+
+
+
+# --- Keep polygon geometries only and convert to terra ---
+prot_area_vect <- vect(
+  prot_area[st_geometry_type(prot_area) %in% c("POLYGON", "MULTIPOLYGON"), ]
+)
+
+# --- Align CRS and extent ---
+eco_reg <- project(eco_reg, roi3)
+prot_area_vect <- crop(project(prot_area_vect, roi3), roi3)
+
+# --- Dissolve all protected areas into a single layer ---
+prot_union <- aggregate(prot_area_vect, dissolve = TRUE)
+
+# --- Compute UNPROTECTED area (ecoregions minus protected areas) ---
+unprot_all <- erase(eco_reg, prot_union)
+
+# --- Optional: split into list by ecoregion (same structure as your original output) ---
+eco_ids <- unique(unprot_all$ECOREGION_)
+
+unprot_list <- lapply(eco_ids, function(id) {
+  aggregate(
+    unprot_all[unprot_all$ECOREGION_ == id, ],
+    by = "ECOREGION_",
+    dissolve = TRUE
+  )
+})
+
+names(unprot_list) <- eco_ids
+
+rare1 <- unprot_list[[1]]
+rare2 <- unprot_list[[2]]
+rare3 <- unprot_list[[3]]
+rare4 <- unprot_list[[4]]
+rare5 <- unprot_list[[5]]
+rare6 <- unprot_list[[6]]
+rare7 <- unprot_list[[7]]
+
+rm(eco_reg, prot_area, prot_area_vect, prot_union, unprot_all, eco_ids, unprot_list)
+gc()
+
+```
+
+
+# 2.0 Species & Habitats
+
+## 2.1 Climate Refugia
+
+Multiple scenarios
+2050s
+
+Not doing trees b/c trees aren't really a priority for grasslands
+
+RCP85 scenario
+
+Threshold is 95th percentile
+
+```{r, eval=T}
+# Define path to the geodatabase(s)
+refugia_grassbird_path <- file.path(
+  dat.dir, "2_species_and_habitats", "2.1_clim_refugia", "NA_Refugia", "2050s", "RCP85_Songbirds",
+  "HabitatGCMCombo", "Grassland_songbird_2050refugia_combo85.tif"
+)
+
+refugia_scrubbird_path <- file.path(
+  dat.dir, "2_species_and_habitats", "2.1_clim_refugia", "NA_Refugia", "2050s", "RCP85_Songbirds",
+  "HabitatGCMCombo", "Scrub_songbird_2050refugia_combo85.tif"
+)
+
+# Read in data
+refugia_grassbird <- rast(refugia_grassbird_path)
+refugia_scrubbird <- rast(refugia_scrubbird_path)
+
+# Harmonize to Study Area CRS
+crs(refugia_grassbird) <- "+proj=laea +lat_0=45 +lon_0=-100 +datum=WGS84 +units=m +no_defs"
+crs(refugia_scrubbird) <- "+proj=laea +lat_0=45 +lon_0=-100 +datum=WGS84 +units=m +no_defs"
+
+refugia_grassbird <- project(refugia_grassbird, roi3)
+refugia_scrubbird <- project(refugia_scrubbird, roi3)
+
+# Crop/mask before percentile
+refugia_grassbird <- crop(refugia_grassbird, roi3, mask = TRUE)
+refugia_scrubbird <- crop(refugia_scrubbird, roi3, mask = TRUE)
+
+# Function to convert raster values to percentiles (0–1)
+to_percentile <- function(r) {
+  vals <- values(r, na.rm = TRUE)
+  ecdf_fun <- ecdf(vals)
+
+  r_pct <- r
+  values(r_pct) <- ecdf_fun(values(r))
+
+  return(r_pct)
+}
+
+# Calculate percentiles
+grassbird_pct <- to_percentile(refugia_grassbird)
+scrubbird_pct <- to_percentile(refugia_scrubbird)
+
+# Threshold at top percentiles
+grassbird_top <- grassbird_pct >= 0.95
+scrubbird_top <- scrubbird_pct >= 0.95
+
+# Convert TRUE/FALSE → 1 / NA
+grassbird_bin <- ifel(grassbird_top, 1, NA)
+scrubbird_bin <- ifel(scrubbird_top, 1, NA)
+
+# Convert to polygons (TRUE areas only)
+refugia_grassbird_poly <- as.polygons(grassbird_bin, dissolve = TRUE, na.rm = TRUE)
+refugia_scrubbird_poly <- as.polygons(scrubbird_bin, dissolve = TRUE, na.rm = TRUE)
+
+# clean-up
+rm(refugia_grassbird_path, refugia_scrubbird_path, refugia_grassbird, refugia_scrubbird,
+   to_percentile, grassbird_pct, scrubbird_pct, grassbird_top, scrubbird_top)
+gc()
+
+```
+
+## 2.2 Upland priority areas for Prairie Habitat 
+
+```{r}
+# Define path to the file(s)
+upland_path <- file.path(dat.dir, "2_species_and_habitats", "2.2_PriorityAreaAnalysisResults", "PriorityAreasPolygons", "UplandSpecies", "X1_Landbirds.ABF_M_q80.shp")
+
+upland <- vect(upland_path)
+
+# Harmonize to Study Area CRS
+upland <- project(upland, roi3)
+
+# clean-up
+rm(upland_path)
+
+```
+
+## 2.3 Richness of species-at-risk
+
+Calculated percentiles for SAR and only keeping polygons in the 95th percentile
+
+```{r, eval=T}
+# Define path 
+sar_path <- file.path(dat.dir, "2_species_and_habitats", "2.3_EBAR_SAR_Heatmap", "EBAR_SAR_Heatmap", "EBAR_SAR_Heatmap.gdb")
+
+sar <- st_read(sar_path, layer = "HeatmapEcoshapeOverview")
+sar <- vect(sar)
+
+# Harmonize to Study Area CRS
+sar <- project(sar, roi3)
+
+# Crop/mask before percentile
+sar <- crop(sar, roi3)
+
+# Calc percentiles
+sar$HeatmapRangeCount_pct <- rank(sar$HeatmapRangeCount, ties.method = "average") / 
+                             sum(!is.na(sar$HeatmapRangeCount))
+
+# Keep polygons at or above the 90th percentile
+sar_top <- sar[sar$HeatmapRangeCount_pct >= 0.95, ]
+
+# plot(sar_top, "HeatmapRangeCount")
+# plot(sar_top, "HeatmapRangeCount_pct")
+# plot(sar, "HeatmapRangeCount")
+# plot(sar, "HeatmapRangeCount_pct")
+
+# clean-up
+rm(sar_path, sar)
+
+```
+
+
+## 2.4 Wildlife habitat availability on farmland: High-Very High Capacity
+
+Areas with high and very high capacity (cap)
+
+```{r, eval=T}
+# Define path to the geodatabase(s)
+farm_path <- file.path(dat.dir, "2_species_and_habitats", "2.4_farmland_habitat", "farmland_habitat", "AEI_MGMNT_WHC_GDB", "AEI_MGMNT_WHC.gdb")
+
+# Read in data
+farm_F <- st_read(farm_path, layer = "AEI_MGMNT_WHC_F_TREND") # feeding
+farm_R <- st_read(farm_path, layer = "AEI_MGMNT_WHC_R_TREND") # reproduction
+
+farm_F <- vect(farm_F)
+farm_R <- vect(farm_R)
+
+# Harmonize to Study Area CRS
+farm_F <- project(farm_F, roi3)
+farm_R <- project(farm_R, roi3)
+
+# Extract areas of high and very high capacity
+# WHC_R/F_2020_CLASS
+# Very High = 1
+# High = 2
+
+farm_F_cap <- farm_F[farm_F$WHC_F_2020_CLASS <= 2, ]
+farm_R_cap <- farm_R[farm_R$WHC_R_2020_CLASS <= 2, ]
+
+
+# clean-up
+rm(farm_path, farm_F, farm_R)
+```
+
+## 2.5 Wildlife habitat availability on farmland: Large-Moderate Decrease
+
+Large and moderate decrease (chng)
+
+```{r}
+# Define path to the geodatabase(s)
+farm_path <- file.path(dat.dir, "2_species_and_habitats", "2.4_farmland_habitat", "farmland_habitat", "AEI_MGMNT_WHC_GDB", "AEI_MGMNT_WHC.gdb")
+
+# Read in data
+farm_F <- st_read(farm_path, layer = "AEI_MGMNT_WHC_F_TREND") # feeding
+farm_R <- st_read(farm_path, layer = "AEI_MGMNT_WHC_R_TREND") # reproduction
+
+farm_F <- vect(farm_F)
+farm_R <- vect(farm_R)
+
+# Harmonize to Study Area CRS
+farm_F <- project(farm_F, roi3)
+farm_R <- project(farm_R, roi3)
+
+# Extract areas with large or moderate decline
+# Intended column: WHC_F_00_20_CHG_CLASS / WHC_R_00_20_CHG_CLASS
+# Large dec = 5, Mod dec = 4
+farm_F_chng <- farm_F[farm_F$WHC_F_00_20_CHG_CLASS >= 4, ]
+farm_R_chng <- farm_R[farm_R$WHC_R_00_20_CHG_CLASS >= 4, ]
+
+# clean-up
+rm(farm_path, farm_F, farm_R)
+```
+
+## 2.6 Species distribution model for grassland birds
+
+Analysis being done externally by Barry Robinson
+
+## 2.7 Habitat suitability for grassland species
+
+Analysis being done externally by James Paterson
+
+## 2.X Areas important for bird population growth
+
+Paused, might drop at some point
+
+
+# 3.0 Grassland Condition
+
+## 3.1 Intact grasslands
+
+Values 0 and 1 == intact
+
+**VERSION 2 CHANGE**: Kept as raster, not converted to polygons
+
+```{r, eval=T}
+# Define path to the file(s)
+intact_path <- file.path(dat.dir, "3_grass_condition", "3.1_WWF_Plowprint_2024", "Spatial_data", "WWF_PP_2024_report_full_extent", "WWF_PP_2024_report_full_extent.tif")
+
+# Read in data
+intact <- rast(intact_path)
+
+# Crop + mask 
+roi3_intact_crs <- project(roi3, crs(intact))
+intact <- crop(intact, roi3_intact_crs)
+intact <- mask(intact, roi3_intact_crs)
+
+# Reclass and save to temp folder
+intact_file <- file.path(tmp_dir, "intact_roi_rc.tif")
+
+if (file.exists(intact_file)) {
+
+  intact_rc <- rast(intact_file)
+  
+  } else {
+    
+    intact_rc <- ifel(
+      intact == 0 | intact == 1,
+      1,
+      NA,
+      filename = intact_file,
+      overwrite = TRUE,
+      datatype = "INT1U"   # 8-bit unsigned integer (small + fast)
+    )
+    
+    }
+
+# Project raster to roi3 CRS
+intact_rc <- project(intact_rc, roi3)
+
+# clean-up
+rm(intact_path, intact, roi3_intact_crs)
+gc()
+```
+
+## 3.2 Native grasslands
+
+**VERSION 2 CHANGE**: Kept as raster, not converted to polygons
+
+```{r}
+# Define path to the file(s)
+native_path <- file.path(dat.dir, "3_grass_condition", "3.2_native_grass", "cfga_ngi_merged_reproj_algn_native.tif")
+
+# Read in data
+native <- rast(native_path)
+
+# Crop + mask
+roi3_native_crs <- project(roi3, crs(native))
+native <- crop(native, roi3_native_crs, mask = TRUE)
+
+# Project to roi3 CRS
+native <- project(native, roi3)
+
+# clean-up
+rm(native_path, roi3_native_crs)
+gc()
+```
+
+## 3.3 Connectivity
+
+Current Density - Conductance?
+
+**VERSION 2 CHANGE**: Kept as raster, not converted to polygons
+
+```{r}
+# Define path to the file(s)
+conn_path <- file.path(dat.dir, "3_grass_condition", "3.3_connectivity", "Current_Density_1_Conductance.tif")
+
+# Read in data
+conn <- rast(conn_path)
+
+# Harmonize to Study Area CRS
+conn <- project(conn, roi3)
+
+# Crop/mask before percentile calc
+conn <- crop(conn, roi3, mask=T)
+
+# Function to convert raster values to percentiles (0–1)
+to_percentile <- function(r) {
+  vals <- values(r, na.rm = TRUE)
+  ecdf_fun <- ecdf(vals)
+  
+  r_pct <- r
+  values(r_pct) <- ecdf_fun(values(r))
+  
+  return(r_pct)
+}
+
+# calc percentiles
+conn_pct <- to_percentile(conn)
+
+# threshold at 95th percentile
+conn_top <- conn_pct >= 0.95
+
+# Convert TRUE/FALSE → 1/NA (required for binary consistency)
+conn_top <- ifel(conn_top, 1, NA)
+
+# clean-up
+rm(conn_path, conn, conn_pct, to_percentile)
+gc()
+
+```
+
+
+# 4.0 Combine indicator data
+
+```{r}
+# special places
+ind_sp <- c(kba, kba_draft, 
+            priority, 
+            comm_priority,
+            rare1, rare2, rare3, rare4, rare5, rare6, rare7)
+
+# species and habitats
+ind_sh <- c(refugia_grassbird_poly, refugia_scrubbird_poly,
+            upland,
+            sar_top,
+            farm_F_cap, farm_R_cap,
+            farm_F_chng, farm_R_chng
+            )
+
+# VERSION 2 NOTE: 3.X indicators are now rasters, not polygons
+# They will be exported separately below
+
+
+```
+
+
+Crop polygon indicators to roi
+```{r}
+# function to crop svc
+crop_svc_to_roi <- function(svc_obj, roi) {
+
+  svc(
+    lapply(as.list(svc_obj), function(x) {
+
+      # Fix geometry if needed
+      if (any(!is.valid(x), na.rm = TRUE)) {
+        x <- makeValid(x)
+      }
+
+      # Use crop instead of intersect
+      out <- crop(x, roi)
+
+      return(out)
+    })
+  )
+}
+
+ind_sp_crop <- crop_svc_to_roi(ind_sp, roi3)
+ind_sh_crop <- crop_svc_to_roi(ind_sh, roi3)
+
+```
+
+# View the indicator shapefiles
+
+```{r}
+plot_svc_layers <- function(svc_obj, roi = NULL, title_prefix = "") {
+
+  layers <- as.list(svc_obj)
+
+  for (i in seq_along(layers)) {
+
+    x <- layers[[i]]
+
+    plot(x,
+         col = "lightgreen",
+         border = "darkgreen",
+         main = paste0(title_prefix, " layer ", i))
+
+    if (!is.null(roi)) {
+      plot(roi, add = TRUE, border = "red", lwd = 2)
+    }
+  }
+}
+
+# Run
+plot_svc_layers(ind_sp_crop, roi3, "ind_sp_crop")
+plot_svc_layers(ind_sh_crop, roi3, "ind_sh_crop")
+
+
+```
+
+
+
+Save to s3
+```{r}
+# Special Places
+numbers_sp <- c("1_1a", "1_1b", "1_2", "1_3",
+                "1_4a", "1_4b", "1_4c", "1_4d", "1_4e", "1_4f", "1_4g")
+
+stopifnot(length(numbers_sp) == length(ind_sp_crop))
+
+for (i in seq_along(ind_sp_crop)) {
+
+  fname <- paste0("ind_sp_", numbers_sp[i], ".gpkg")
+
+  writeVector(
+    ind_sp_crop[[i]],
+    file.path(ind.dir, fname),
+    overwrite = TRUE
+  )
+}
+
+# Species + Habitats
+numbers_sh <- c("2_1a", "2_1b",
+                "2_2","2_3", 
+                "2_4a", "2_4b", "2_5a", "2_5b")
+
+stopifnot(length(numbers_sh) == length(ind_sh_crop))
+
+for (i in seq_along(ind_sh_crop)) {
+
+  fname <- paste0("ind_sh_", numbers_sh[i], ".gpkg")
+
+  writeVector(
+    ind_sh_crop[[i]],
+    file.path(ind.dir, fname),
+    overwrite = TRUE
+  )
+}
+
+# Grassland Condition - RASTERS (VERSION 2 CHANGE)
+# Export as individual TIF files instead of GPKG polygons
+numbers_gc <- c("3_1", "3_2", "3_3")
+
+writeRaster(
+  intact_rc,
+  file.path(ind.dir, paste0("ind_gc_", numbers_gc[1], ".tif")),
+  overwrite = TRUE
+)
+
+writeRaster(
+  native,
+  file.path(ind.dir, paste0("ind_gc_", numbers_gc[2], ".tif")),
+  overwrite = TRUE
+)
+
+writeRaster(
+  conn_top,
+  file.path(ind.dir, paste0("ind_gc_", numbers_gc[3], ".tif")),
+  overwrite = TRUE
+)
+
+```

@@ -1,0 +1,240 @@
+---
+title: "Calculate Indicators (v2 - Mixed Polygon and Raster)"
+output: # html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+# R Set-up
+
+```{r}
+# Clear workspace
+rm(list = ls())
+
+# Libraries 
+library(terra)
+library(here)
+library(purrr)
+library(dplyr)
+library(tigris)
+library(sf)
+library(aws.s3)
+
+# Authenticate aws
+source(here::here('aws_cred.R'))
+
+# Base S3 location (GDAL-style path)
+s3_base <- "/vsis3/sagemaker-gst-stage.sharing/ciara-hovis/TomoPrairie/bd_data"
+
+dat.dir <- file.path(s3_base, "raw")
+roi.dir <- file.path(s3_base, "studyarea")
+dum.dir <- file.path(s3_base, "dummy")
+ind.dir <- file.path(s3_base, "indicators")
+
+```
+
+# Data
+
+## 0.1 Indicator Data - Mixed Polygon and Raster
+
+**VERSION 2 CHANGE**: This version handles both polygon indicators (1.X, 2.X) and raster indicators (3.X)
+
+```{r}
+# Get all objects in the indicators directory
+objs <- get_bucket(
+  bucket = "sagemaker-gst-stage.sharing",
+  prefix = "ciara-hovis/TomoPrairie/bd_data/indicators/"
+)
+
+all_files <- paste0(
+  "/vsis3/sagemaker-gst-stage.sharing/",
+  sapply(objs, `[[`, "Key")
+)
+
+# Separate polygon and raster files
+gpkg_files <- all_files[grepl("\\.gpkg$", all_files)]
+tif_files <- all_files[grepl("\\.tif$", all_files) & grepl("ind_gc_3_", all_files)]
+
+# Create polygon indicators table
+polygon_tbl <- data.frame(
+  file = gpkg_files,
+  indicator_id = sub("^ind_(.*)\\.gpkg$", "\\1", basename(gpkg_files)),
+  type = "polygon",
+  stringsAsFactors = FALSE
+)
+polygon_tbl$vector <- lapply(polygon_tbl$file, vect)
+
+# Create raster indicators table
+raster_tbl <- data.frame(
+  file = tif_files,
+  indicator_id = sub("^ind_(.*)\\.tif$", "\\1", basename(tif_files)),
+  type = "raster",
+  stringsAsFactors = FALSE
+)
+raster_tbl$raster <- lapply(raster_tbl$file, rast)
+
+# Combine into single table
+indicator_tbl <- dplyr::bind_rows(polygon_tbl, raster_tbl)
+
+```
+
+
+## 0.2 Dummy Data
+
+```{r}
+dum_base <- rast(file.path(dum.dir, "eccc_reclass_reproj_algn_binary.tif"))
+dum_base <- rast(file.path(dum.dir, "gpw_reproj_algn_natseminat_noshrub_masked.tif"))
+dum_fut <- rast(file.path(dum.dir, "AAFC_LUTS_2020_5-classes.tif"))
+
+# plot(dum_base)
+# plot(dum_fut)
+
+roi3 <- vect(file.path(roi.dir, "modelling_study_area_aligned_cnvc_Jan2026.shp"))
+
+# Reproject baseline 
+dum_base <- if (file.exists("tmp_data/dum_base_projected.tif")) {
+  rast("tmp_data/dum_base_projected.tif")
+} else {
+  writeRaster(project(dum_base, roi3), "tmp_data/dum_base_projected.tif", overwrite = TRUE)
+}
+
+```
+
+
+# Calc indicators
+
+```{r}
+# ---- Progress logging setup ----
+
+log_file <- here::here(
+  "logs",
+  paste0("indicator_progress_studyarea_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".log")
+)
+
+dir.create(dirname(log_file), showWarnings = FALSE, recursive = TRUE)
+
+log_msg <- function(msg) {
+  timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+  cat(sprintf("[%s] %s\n", timestamp, msg),
+      file = log_file,
+      append = TRUE)
+}
+
+log_msg("Starting indicator calculation (v2 - mixed polygon and raster)")
+log_msg(paste("Total indicators:", nrow(indicator_tbl)))
+log_msg(paste("  - Polygon indicators:", sum(indicator_tbl$type == "polygon")))
+log_msg(paste("  - Raster indicators:", sum(indicator_tbl$type == "raster")))
+```
+
+
+```{r}
+# Enable parallel processing inside terra
+terraOptions(cores = parallel::detectCores())
+
+pb <- txtProgressBar(min = 0, max = nrow(indicator_tbl), style = 3)
+
+results <- vector("list", nrow(indicator_tbl))
+
+for (i in seq_len(nrow(indicator_tbl))) {
+  id <- indicator_tbl$indicator_id[i]
+  type <- indicator_tbl$type[i]
+
+  log_msg(sprintf("Indicator %s (%s): started", id, type))
+
+  res <- tryCatch({
+    
+    if (type == "polygon") {
+      # POLYGON PATH (1.X and 2.X indicators)
+      v <- indicator_tbl$vector[[i]]
+      
+      # Union all features into one
+      v_one <- terra::union(v)
+      
+      log_msg(sprintf(
+        "Indicator %s: dissolved to %d feature(s)",
+        id, nrow(v_one)
+      ))
+
+      # Extract pixel count from dummy base raster
+      pix_sum <- extract(
+        dum_base,
+        v_one,
+        fun = sum,
+        na.rm = TRUE
+      )
+      
+      pix_val <- pix_sum[, 2, drop = TRUE]
+      
+    } else if (type == "raster") {
+      # RASTER PATH (3.X indicators)
+      r <- indicator_tbl$raster[[i]]
+      
+      # Crop/mask to roi3 to ensure consistency
+      r_cropped <- crop(r, roi3, mask = TRUE)
+      
+      # Sum all non-NA pixels (which should be 1)
+      pix_val <- sum(values(r_cropped), na.rm = TRUE)
+      
+      log_msg(sprintf(
+        "Indicator %s: raster sum = %s",
+        id, pix_val
+      ))
+    }
+    
+    log_msg(sprintf(
+      "Indicator %s: pixel count = %s",
+      id, pix_val
+    ))
+
+    data.frame(
+      indicator_id = id,
+      pixel_ones   = pix_val,
+      stringsAsFactors = FALSE
+    )
+
+  }, error = function(e) {
+
+    log_msg(sprintf(
+      "Indicator %s: ERROR - %s",
+      id, e$message
+    ))
+
+    NULL
+  })
+
+  results[[i]] <- res
+  setTxtProgressBar(pb, i)
+
+  log_msg(sprintf("Indicator %s: finished", id))
+}
+
+close(pb)
+
+log_msg("Indicator calculation completed")
+
+```
+
+```{r}
+indicators_studyarea_df <- dplyr::bind_rows(results)
+```
+
+
+```{r}
+# Write local temp CSV
+tmp_csv <- tempfile(fileext = ".csv")
+
+write.csv(
+  indicators_studyarea_df,
+  tmp_csv,
+  row.names = FALSE
+)
+
+# Upload to S3
+aws.s3::put_object(
+  file   = tmp_csv,
+  bucket = "sagemaker-gst-stage.sharing",
+  object = "ciara-hovis/TomoPrairie/results/indicators_studyarea_pixel_counts2.csv"
+)
+
+log_msg("Saved indicators_studyarea_pixel_counts.csv to S3")
+```

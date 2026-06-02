@@ -1,5 +1,5 @@
 ---
-title: "Calculate Indicators (v2 - Mixed Polygon and Raster)"
+title: "Calculate Indicators (v2.1 - Mixed Polygon and Raster - CORRECTED)"
 output: # html_notebook
 editor_options: 
   chunk_output_type: console
@@ -37,7 +37,7 @@ ind.dir <- file.path(s3_base, "indicators")
 
 ## 0.1 Indicator Data - Mixed Polygon and Raster
 
-**VERSION 2 CHANGE**: This version handles both polygon indicators (1.X, 2.X) and raster indicators (3.X)
+**VERSION 2.1 CHANGE**: Fixed bug where multiple pixel counts were being logged per indicator instead of a single summed count.
 
 ```{r}
 # Get all objects in the indicators directory
@@ -120,7 +120,7 @@ log_msg <- function(msg) {
       append = TRUE)
 }
 
-log_msg("Starting indicator calculation (v2 - mixed polygon and raster)")
+log_msg("Starting indicator calculation (v2.1 - mixed polygon and raster, BUG FIX)")
 log_msg(paste("Total indicators:", nrow(indicator_tbl)))
 log_msg(paste("  - Polygon indicators:", sum(indicator_tbl$type == "polygon")))
 log_msg(paste("  - Raster indicators:", sum(indicator_tbl$type == "raster")))

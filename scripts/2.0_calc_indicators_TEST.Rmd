@@ -1,0 +1,321 @@
+---
+title: "Calculate Indicators - TEST (Single Indicator)"
+output: # html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+# R Set-up
+
+```{r}
+# Clear workspace
+rm(list = ls())
+gc()
+
+# Libraries 
+library(terra)
+library(here)
+library(purrr)
+library(dplyr)
+library(tigris)
+library(sf)
+library(aws.s3)
+
+# Authenticate aws
+source(here::here('aws_cred.R'))
+
+# Base S3 location (GDAL-style path)
+s3_base <- "/vsis3/sagemaker-gst-stage.sharing/ciara-hovis/TomoPrairie/bd_data"
+
+dat.dir <- file.path(s3_base, "raw")
+roi.dir <- file.path(s3_base, "studyarea")
+dum.dir <- file.path(s3_base, "dummy")
+ind.dir <- file.path(s3_base, "indicators")
+
+```
+
+# Data
+
+## 0.1 Load Dummy Raster and ROI
+
+```{r}
+dum_base <- rast(file.path(dum.dir, "gpw_reproj_algn_natseminat_noshrub_masked.tif"))
+roi3 <- vect(file.path(roi.dir, "modelling_study_area_aligned_cnvc_Jan2026.shp"))
+
+# Reproject baseline 
+dum_base <- if (file.exists("tmp_data/dum_base_projected.tif")) {
+  rast("tmp_data/dum_base_projected.tif")
+} else {
+  writeRaster(project(dum_base, roi3), "tmp_data/dum_base_projected.tif", overwrite = TRUE)
+}
+
+# Enable parallel processing inside terra
+terraOptions(cores = parallel::detectCores())
+
+```
+
+# Test Configuration
+
+**Choose which indicator(s) to test:**
+
+```{r}
+# TEST SELECTION: Set to TRUE for the indicator(s) you want to test
+
+test_config <- list(
+  # Polygon indicators (choose one or more)
+  sh_2_4a = TRUE,      # 289 features - memory heavy (took ~7 hours)
+  sh_2_4b = FALSE,     # 142 features
+  sh_2_5b = FALSE,     # 196 features
+  sp_1_1a = FALSE,     # 55 features
+  
+  # Raster indicators (to test the new raster path)
+  gc_3_1 = FALSE,      # Intact grasslands
+  gc_3_2 = FALSE,      # Native grasslands
+  gc_3_3 = FALSE       # Connectivity
+)
+
+# Build list of indicators to test
+test_indicators <- names(test_config)[unlist(test_config)]
+
+if (length(test_indicators) == 0) {
+  stop("No indicators selected for testing. Set at least one to TRUE in test_config.")
+}
+
+cat("Testing indicators:", paste(test_indicators, collapse = ", "), "\n\n")
+
+```
+
+# Progress Logging
+
+```{r}
+# ---- Progress logging setup ----
+
+log_file <- here::here(
+  "logs",
+  paste0("indicator_progress_TEST_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".log")
+)
+
+dir.create(dirname(log_file), showWarnings = FALSE, recursive = TRUE)
+
+log_msg <- function(msg) {
+  timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+  cat(sprintf("[%s] %s\n", timestamp, msg),
+      file = log_file,
+      append = TRUE)
+  # Also print to console
+  cat(sprintf("[%s] %s\n", timestamp, msg))
+}
+
+log_msg("Starting TEST indicator calculation")
+log_msg(paste("Testing indicators:", paste(test_indicators, collapse = ", ")))
+
+```
+
+# Load All Indicators
+
+```{r}
+# Get all objects in the indicators directory
+objs <- get_bucket(
+  bucket = "sagemaker-gst-stage.sharing",
+  prefix = "ciara-hovis/TomoPrairie/bd_data/indicators/"
+)
+
+all_files <- paste0(
+  "/vsis3/sagemaker-gst-stage.sharing/",
+  sapply(objs, `[[`, "Key")
+)
+
+# Separate polygon and raster files
+gpkg_files <- all_files[grepl("\\.gpkg$", all_files)]
+tif_files <- all_files[grepl("\\.tif$", all_files) & grepl("ind_gc_3_", all_files)]
+
+# Create polygon indicators table
+polygon_tbl <- data.frame(
+  file = gpkg_files,
+  indicator_id = sub("^ind_(.*)\\.gpkg$", "\\1", basename(gpkg_files)),
+  type = "polygon",
+  stringsAsFactors = FALSE
+)
+
+# Create raster indicators table
+raster_tbl <- data.frame(
+  file = tif_files,
+  indicator_id = sub("^ind_(.*)\\.tif$", "\\1", basename(tif_files)),
+  type = "raster",
+  stringsAsFactors = FALSE
+)
+
+# Combine into single table
+indicator_tbl <- dplyr::bind_rows(polygon_tbl, raster_tbl)
+
+log_msg(paste("Total indicators available:", nrow(indicator_tbl)))
+log_msg(paste("  - Polygon indicators:", nrow(polygon_tbl)))
+log_msg(paste("  - Raster indicators:", nrow(raster_tbl)))
+
+```
+
+# Process Selected Indicators
+
+```{r}
+results <- vector("list", length(test_indicators))
+
+for (idx in seq_along(test_indicators)) {
+  
+  test_id <- test_indicators[idx]
+  
+  # Find this indicator in the table
+  ind_row <- which(indicator_tbl$indicator_id == test_id)
+  
+  if (length(ind_row) == 0) {
+    log_msg(sprintf("WARNING: Indicator %s not found in list", test_id))
+    results[[idx]] <- data.frame(
+      indicator_id = test_id,
+      status = "NOT_FOUND",
+      pixel_ones = NA_real_,
+      error = "Indicator not found",
+      stringsAsFactors = FALSE
+    )
+    next
+  }
+  
+  id <- indicator_tbl$indicator_id[ind_row]
+  type <- indicator_tbl$type[ind_row]
+  
+  log_msg(sprintf(""))
+  log_msg(sprintf("=== INDICATOR %s (%s) ===", id, type))
+  
+  # Memory status before
+  gc()
+  mem_before <- as.numeric(system("free -m | grep Mem | awk '{print $7}'", intern = TRUE))
+  log_msg(sprintf("Memory available before: %d MB", mem_before))
+  
+  start_time <- Sys.time()
+  
+  res <- tryCatch({
+    
+    if (type == "polygon") {
+      # POLYGON PATH
+      log_msg(sprintf("Loading polygon vector: %s", indicator_tbl$file[ind_row]))
+      v <- vect(indicator_tbl$file[ind_row])
+      
+      log_msg(sprintf("Original vector: %d features", nrow(v)))
+      
+      # Union all features into one
+      log_msg("Dissolving features with union()...")
+      v_one <- terra::union(v)
+      
+      log_msg(sprintf("After union: %d feature(s)", nrow(v_one)))
+
+      # Extract pixel count from dummy base raster
+      log_msg("Extracting pixels from raster...")
+      pix_sum <- extract(
+        dum_base,
+        v_one,
+        fun = sum,
+        na.rm = TRUE
+      )
+      
+      log_msg(sprintf("Extract result: %d rows", nrow(pix_sum)))
+      
+      # Sum across all features (in case union didn't fully dissolve)
+      pix_val <- sum(pix_sum[, 2], na.rm = TRUE)
+      
+      # Clean up intermediate objects
+      rm(v, v_one, pix_sum)
+      gc()
+      
+      data.frame(
+        indicator_id = id,
+        status = "SUCCESS",
+        pixel_ones = pix_val,
+        error = NA_character_,
+        stringsAsFactors = FALSE
+      )
+      
+    } else if (type == "raster") {
+      # RASTER PATH
+      log_msg(sprintf("Loading raster: %s", indicator_tbl$file[ind_row]))
+      r <- rast(indicator_tbl$file[ind_row])
+      
+      log_msg(sprintf("Raster dimensions: %d x %d x %d layers", 
+                      nrow(r), ncol(r), nlyr(r)))
+      
+      # Crop/mask to roi3 to ensure consistency
+      log_msg("Cropping/masking to ROI...")
+      r_cropped <- crop(r, roi3, mask = TRUE)
+      
+      # Sum all non-NA pixels
+      log_msg("Summing raster values...")
+      pix_val <- sum(values(r_cropped), na.rm = TRUE)
+      
+      log_msg(sprintf("Raster pixel sum: %f", pix_val))
+      
+      # Clean up
+      rm(r, r_cropped)
+      gc()
+      
+      data.frame(
+        indicator_id = id,
+        status = "SUCCESS",
+        pixel_ones = pix_val,
+        error = NA_character_,
+        stringsAsFactors = FALSE
+      )
+    }
+
+  }, error = function(e) {
+    
+    log_msg(sprintf("ERROR: %s", e$message))
+    
+    data.frame(
+      indicator_id = id,
+      status = "ERROR",
+      pixel_ones = NA_real_,
+      error = e$message,
+      stringsAsFactors = FALSE
+    )
+  })
+  
+  results[[idx]] <- res
+  
+  # Memory status after
+  gc()
+  mem_after <- as.numeric(system("free -m | grep Mem | awk '{print $7}'", intern = TRUE))
+  elapsed <- difftime(Sys.time(), start_time, units = "mins")
+  
+  log_msg(sprintf("Memory available after: %d MB (delta: %d MB)", 
+                  mem_after, mem_before - mem_after))
+  log_msg(sprintf("Time elapsed: %.2f minutes", as.numeric(elapsed)))
+  log_msg(sprintf("Result: %s", res$status))
+  if (res$status == "SUCCESS") {
+    log_msg(sprintf("Pixel count: %f", res$pixel_ones))
+  }
+  
+}
+
+```
+
+# Compile Results
+
+```{r}
+results_df <- dplyr::bind_rows(results)
+
+log_msg("")
+log_msg("=== TEST SUMMARY ===")
+log_msg(paste("Total tests:", nrow(results_df)))
+log_msg(paste("Successes:", sum(results_df$status == "SUCCESS")))
+log_msg(paste("Failures:", sum(results_df$status == "ERROR")))
+
+print(results_df)
+
+# Save results locally
+write.csv(
+  results_df,
+  "TEST_indicator_results.csv",
+  row.names = FALSE
+)
+
+log_msg("Test results saved to TEST_indicator_results.csv")
+log_msg("TEST COMPLETE")
+
+```

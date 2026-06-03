@@ -1,0 +1,408 @@
+---
+title: "Biodiversity Indicators - Rasterize All (v3)"
+output: # html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+# R Set-up
+
+```{r}
+# Clear workspace
+rm(list = ls())
+gc()
+
+# Libraries 
+library(terra)
+library(here)
+library(dplyr)
+library(sf)
+
+# Authenticate aws
+source(here::here('aws_cred.R'))
+
+# Base S3 location (GDAL-style path)
+s3_base <- "/vsis3/sagemaker-gst-stage.sharing/ciara-hovis/TomoPrairie/bd_data"
+
+dat.dir <- file.path(s3_base, "raw")
+roi.dir <- file.path(s3_base, "studyarea")
+dum.dir <- file.path(s3_base, "dummy")
+ind.dir <- file.path(s3_base, "indicators")
+tmp_dir <- "/home/sagemaker-user/WG_Biodiversity/tmp_data"
+
+```
+
+# Setup: Template Raster and ROI
+
+Load the template raster (dum_base) that Script 2.0 will use. All indicators will be rasterized to match this exactly.
+
+```{r}
+# Load template raster
+dum_base <- rast(file.path(dum.dir, "gpw_reproj_algn_natseminat_noshrub_masked.tif"))
+
+# Load study area boundary
+roi3 <- vect(file.path(roi.dir, "modelling_study_area_aligned_cnvc_Jan2026.shp"))
+
+# Reproject dum_base to roi3 CRS if needed
+dum_base <- project(dum_base, roi3)
+
+# Create a clean template (0s everywhere) to use for rasterizing indicators
+# This ensures all indicators align perfectly with dum_base
+template <- dum_base
+values(template) <- 0
+
+# Log template properties
+cat("Template raster properties:\n")
+cat("  CRS:", crs(template), "\n")
+cat("  Extent:", ext(template), "\n")
+cat("  Resolution:", res(template), "\n")
+cat("  Dimensions:", dim(template), "\n\n")
+
+```
+
+# 1.0 Special Places
+
+## 1.1 Key Biodiversity Areas
+
+```{r}
+kba_path <- file.path(dat.dir, "1_special_places", "1.1_KBAs", "AcceptedKBAs.gdb")
+kba_draft_path <- file.path(dat.dir, "1_special_places", "1.1_KBAs", "DRAFTKBAs.gdb")
+
+kba <- st_read(kba_path, layer = "KBASite") |> vect() |> project(roi3)
+kba_draft <- st_read(kba_draft_path, layer = "DRAFT_KBASite") |> vect() |> project(roi3)
+
+# Combine KBAs
+kba_combined <- rbind(kba, kba_draft)
+
+# Rasterize
+ind_sp_1_1a <- rasterize(kba, template, field = 1, background = 0)
+ind_sp_1_1b <- rasterize(kba_draft, template, field = 1, background = 0)
+
+# Binary (1 or 0)
+ind_sp_1_1a <- ifel(ind_sp_1_1a > 0, 1, 0)
+ind_sp_1_1b <- ifel(ind_sp_1_1b > 0, 1, 0)
+
+rm(kba, kba_draft, kba_combined, kba_path, kba_draft_path)
+gc()
+
+cat("1.1 KBAs: rasterized\n")
+```
+
+## 1.2 ECCC Priority Places for Species-at-Risk
+
+```{r}
+priority_path <- file.path(dat.dir, "1_special_places", "1.2_PriorityPlaces", "PriorityPlaces.gdb")
+
+priority <- st_read(priority_path, layer = "PriorityPlacesBoundary") |> vect() |> project(roi3)
+
+ind_sp_1_2 <- rasterize(priority, template, field = 1, background = 0)
+ind_sp_1_2 <- ifel(ind_sp_1_2 > 0, 1, 0)
+
+rm(priority, priority_path)
+gc()
+
+cat("1.2 Priority Places: rasterized\n")
+```
+
+## 1.3 ECCC Community Nominated Priority Places
+
+```{r}
+comm_priority_path <- file.path(dat.dir, "1_special_places", "1.3_CommunityNominated_PriorityPlaces", 
+                                "CommunityNominated_PriorityPlaces.gdb")
+
+comm_priority <- st_read(comm_priority_path, layer = "CommunityNominated_PriorityPlaces") |> 
+  vect() |> project(roi3)
+
+ind_sp_1_3 <- rasterize(comm_priority, template, field = 1, background = 0)
+ind_sp_1_3 <- ifel(ind_sp_1_3 > 0, 1, 0)
+
+rm(comm_priority, comm_priority_path)
+gc()
+
+cat("1.3 Community Nominated: rasterized\n")
+```
+
+## 1.4 Relatively Rare Grasses (Unprotected by Ecoregion)
+
+```{r}
+eco_reg <- vect(file.path(roi.dir, "national-ecological-framework-for-canada", 
+                          "Ecoregions", "ecoregions_clean_prairies.shp")) |> project(roi3)
+
+prot_area <- st_read(file.path(dat.dir, "1_special_places", "1.4_ProtectedAreas",
+                               "ProtectedConservedArea_2025", "ProtectedConservedArea_2025.gdb"),
+                     layer = "ProtectedConservedArea_2025")
+
+prot_area_vect <- vect(prot_area[st_geometry_type(prot_area) %in% c("POLYGON", "MULTIPOLYGON"), ]) |>
+  project(roi3) |> crop(roi3)
+
+prot_union <- aggregate(prot_area_vect, dissolve = TRUE)
+unprot_all <- erase(eco_reg, prot_union)
+
+# Split by ecoregion and rasterize each
+eco_ids <- unique(unprot_all$ECOREGION_)
+
+rare_rasters <- lapply(seq_along(eco_ids), function(i) {
+  eco_subset <- unprot_all[unprot_all$ECOREGION_ == eco_ids[i], ]
+  rasterize(eco_subset, template, field = 1, background = 0) |>
+    {\(x) ifel(x > 0, 1, 0)}()
+})
+
+# Assign to individual variables
+ind_sp_1_4a <- rare_rasters[[1]]
+ind_sp_1_4b <- rare_rasters[[2]]
+ind_sp_1_4c <- rare_rasters[[3]]
+ind_sp_1_4d <- rare_rasters[[4]]
+ind_sp_1_4e <- rare_rasters[[5]]
+ind_sp_1_4f <- rare_rasters[[6]]
+ind_sp_1_4g <- rare_rasters[[7]]
+
+rm(eco_reg, prot_area, prot_area_vect, prot_union, unprot_all, eco_ids, rare_rasters)
+gc()
+
+cat("1.4 Rare Grasses: rasterized by ecoregion\n")
+```
+
+# 2.0 Species & Habitats
+
+## 2.1 Climate Refugia
+
+```{r}
+to_percentile <- function(r) {
+  vals <- values(r, na.rm = TRUE)
+  ecdf_fun <- ecdf(vals)
+  r_pct <- r
+  values(r_pct) <- ecdf_fun(values(r))
+  return(r_pct)
+}
+
+# Grassland songbird refugia
+refugia_grassbird <- rast(file.path(
+  dat.dir, "2_species_and_habitats", "2.1_clim_refugia", "NA_Refugia", "2050s", "RCP85_Songbirds",
+  "HabitatGCMCombo", "Grassland_songbird_2050refugia_combo85.tif"
+))
+crs(refugia_grassbird) <- "+proj=laea +lat_0=45 +lon_0=-100 +datum=WGS84 +units=m +no_defs"
+refugia_grassbird <- project(refugia_grassbird, roi3) |> crop(roi3, mask = TRUE)
+
+grassbird_pct <- to_percentile(refugia_grassbird)
+ind_sh_2_1a <- ifel(grassbird_pct >= 0.95, 1, 0)
+
+rm(refugia_grassbird, grassbird_pct)
+gc()
+
+# Scrub songbird refugia
+refugia_scrubbird <- rast(file.path(
+  dat.dir, "2_species_and_habitats", "2.1_clim_refugia", "NA_Refugia", "2050s", "RCP85_Songbirds",
+  "HabitatGCMCombo", "Scrub_songbird_2050refugia_combo85.tif"
+))
+crs(refugia_scrubbird) <- "+proj=laea +lat_0=45 +lon_0=-100 +datum=WGS84 +units=m +no_defs"
+refugia_scrubbird <- project(refugia_scrubbird, roi3) |> crop(roi3, mask = TRUE)
+
+scrubbird_pct <- to_percentile(refugia_scrubbird)
+ind_sh_2_1b <- ifel(scrubbird_pct >= 0.95, 1, 0)
+
+rm(refugia_scrubbird, scrubbird_pct, to_percentile)
+gc()
+
+cat("2.1 Climate Refugia: rasterized\n")
+```
+
+## 2.2 Upland Priority Areas
+
+```{r}
+upland_path <- file.path(dat.dir, "2_species_and_habitats", "2.2_PriorityAreaAnalysisResults",
+                         "PriorityAreasPolygons", "UplandSpecies", "X1_Landbirds.ABF_M_q80.shp")
+
+upland <- vect(upland_path) |> project(roi3)
+
+ind_sh_2_2 <- rasterize(upland, template, field = 1, background = 0)
+ind_sh_2_2 <- ifel(ind_sh_2_2 > 0, 1, 0)
+
+rm(upland, upland_path)
+gc()
+
+cat("2.2 Upland Priority: rasterized\n")
+```
+
+## 2.3 SAR Richness (95th Percentile)
+
+```{r}
+sar_path <- file.path(dat.dir, "2_species_and_habitats", "2.3_EBAR_SAR_Heatmap",
+                      "EBAR_SAR_Heatmap", "EBAR_SAR_Heatmap.gdb")
+
+sar <- st_read(sar_path, layer = "HeatmapEcoshapeOverview") |> vect() |> project(roi3) |> crop(roi3)
+
+# Calculate percentiles
+sar$pct <- rank(sar$HeatmapRangeCount, ties.method = "average") / sum(!is.na(sar$HeatmapRangeCount))
+
+# Filter to 95th percentile
+sar_top <- sar[sar$pct >= 0.95, ]
+
+ind_sh_2_3 <- rasterize(sar_top, template, field = 1, background = 0)
+ind_sh_2_3 <- ifel(ind_sh_2_3 > 0, 1, 0)
+
+rm(sar, sar_top, sar_path)
+gc()
+
+cat("2.3 SAR Richness: rasterized\n")
+```
+
+## 2.4 & 2.5 Farmland Habitat
+
+```{r}
+farm_path <- file.path(dat.dir, "2_species_and_habitats", "2.4_farmland_habitat", "farmland_habitat",
+                       "AEI_MGMNT_WHC_GDB", "AEI_MGMNT_WHC.gdb")
+
+# Load both layers once
+farm_F <- st_read(farm_path, layer = "AEI_MGMNT_WHC_F_TREND") |> vect() |> project(roi3)
+farm_R <- st_read(farm_path, layer = "AEI_MGMNT_WHC_R_TREND") |> vect() |> project(roi3)
+
+# 2.4: High and Very High Capacity
+farm_F_cap <- farm_F[farm_F$WHC_F_2020_CLASS <= 2, ]
+farm_R_cap <- farm_R[farm_R$WHC_R_2020_CLASS <= 2, ]
+
+ind_sh_2_4a <- rasterize(farm_F_cap, template, field = 1, background = 0) |>
+  {\(x) ifel(x > 0, 1, 0)}()
+
+ind_sh_2_4b <- rasterize(farm_R_cap, template, field = 1, background = 0) |>
+  {\(x) ifel(x > 0, 1, 0)}()
+
+# 2.5: Large and Moderate Decline
+farm_F_chng <- farm_F[farm_F$WHC_F_00_20_CHG_CLASS >= 4, ]
+farm_R_chng <- farm_R[farm_R$WHC_R_00_20_CHG_CLASS >= 4, ]
+
+ind_sh_2_5a <- rasterize(farm_F_chng, template, field = 1, background = 0) |>
+  {\(x) ifel(x > 0, 1, 0)}()
+
+ind_sh_2_5b <- rasterize(farm_R_chng, template, field = 1, background = 0) |>
+  {\(x) ifel(x > 0, 1, 0)}()
+
+rm(farm_path, farm_F, farm_R, farm_F_cap, farm_R_cap, farm_F_chng, farm_R_chng)
+gc()
+
+cat("2.4 & 2.5 Farmland Habitat: rasterized\n")
+```
+
+# 3.0 Grassland Condition
+
+## 3.1 Intact Grasslands
+
+```{r}
+intact_path <- file.path(dat.dir, "3_grass_condition", "3.1_WWF_Plowprint_2024", "Spatial_data",
+                         "WWF_PP_2024_report_full_extent", "WWF_PP_2024_report_full_extent.tif")
+
+intact <- rast(intact_path) |> project(roi3) |> crop(roi3, mask = TRUE)
+
+# Reclassify: 0 and 1 both = intact, rest = NA
+intact_rc <- ifel((intact == 0) | (intact == 1), 1, 0)
+
+ind_gc_3_1 <- intact_rc
+
+rm(intact_path, intact, intact_rc)
+gc()
+
+cat("3.1 Intact Grasslands: processed\n")
+```
+
+## 3.2 Native Grasslands
+
+```{r}
+native_path <- file.path(dat.dir, "3_grass_condition", "3.2_native_grass",
+                         "cfga_ngi_merged_reproj_algn_native.tif")
+
+native <- rast(native_path) |> project(roi3) |> crop(roi3, mask = TRUE)
+
+# Native grassland: keep as-is but ensure binary
+ind_gc_3_2 <- ifel(native > 0, 1, 0)
+
+rm(native_path, native)
+gc()
+
+cat("3.2 Native Grasslands: processed\n")
+```
+
+## 3.3 Connectivity
+
+```{r}
+conn_path <- file.path(dat.dir, "3_grass_condition", "3.3_connectivity",
+                       "Current_Density_1_Conductance.tif")
+
+conn <- rast(conn_path) |> project(roi3) |> crop(roi3, mask = TRUE)
+
+# Convert to percentiles and threshold at 95th percentile
+vals <- values(conn, na.rm = TRUE)
+ecdf_fun <- ecdf(vals)
+conn_pct <- conn
+values(conn_pct) <- ecdf_fun(values(conn))
+
+ind_gc_3_3 <- ifel(conn_pct >= 0.95, 1, 0)
+
+rm(conn_path, conn, conn_pct, vals, ecdf_fun)
+gc()
+
+cat("3.3 Connectivity: processed\n")
+```
+
+# Stack All Indicators
+
+Create a single multi-layer raster with all 22 indicators.
+
+```{r}
+# Create stack of all indicator rasters
+all_indicators <- c(
+  # Special Places (11 indicators)
+  ind_sp_1_1a, ind_sp_1_1b, ind_sp_1_2, ind_sp_1_3,
+  ind_sp_1_4a, ind_sp_1_4b, ind_sp_1_4c, ind_sp_1_4d, ind_sp_1_4e, ind_sp_1_4f, ind_sp_1_4g,
+  # Species & Habitats (8 indicators)
+  ind_sh_2_1a, ind_sh_2_1b, ind_sh_2_2, ind_sh_2_3,
+  ind_sh_2_4a, ind_sh_2_4b, ind_sh_2_5a, ind_sh_2_5b,
+  # Grassland Condition (3 indicators)
+  ind_gc_3_1, ind_gc_3_2, ind_gc_3_3
+)
+
+# Set names
+names(all_indicators) <- c(
+  # Special Places
+  "sp_1_1a", "sp_1_1b", "sp_1_2", "sp_1_3",
+  "sp_1_4a", "sp_1_4b", "sp_1_4c", "sp_1_4d", "sp_1_4e", "sp_1_4f", "sp_1_4g",
+  # Species & Habitats
+  "sh_2_1a", "sh_2_1b", "sh_2_2", "sh_2_3",
+  "sh_2_4a", "sh_2_4b", "sh_2_5a", "sh_2_5b",
+  # Grassland Condition
+  "gc_3_1", "gc_3_2", "gc_3_3"
+)
+
+cat("\nIndicator stack created:\n")
+cat("  Number of layers:", nlyr(all_indicators), "\n")
+cat("  CRS:", crs(all_indicators), "\n")
+cat("  Extent:", ext(all_indicators), "\n")
+cat("  Layer names:", paste(names(all_indicators), collapse = ", "), "\n\n")
+
+```
+
+# Save Stack to S3
+
+```{r}
+output_path <- file.path(ind.dir, "indicators_stack.tif")
+
+cat("Saving indicator stack to:", output_path, "\n")
+
+writeRaster(
+  all_indicators,
+  output_path,
+  overwrite = TRUE,
+  gdal = c("COMPRESS=DEFLATE", "BIGTIFF=YES")
+)
+
+cat("SUCCESS: Saved indicators_stack.tif to S3\n")
+cat("File ready for Script 2.0\n")
+
+```
+
+# Cleanup
+
+```{r}
+rm(list = ls())
+gc()
+
+cat("Script 1.0 v3 complete.\n")
+```

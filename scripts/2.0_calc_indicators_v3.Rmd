@@ -1,0 +1,169 @@
+---
+title: "Calculate Indicators (v3 - Raster Stack)"
+output: # html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+# R Set-up
+
+```{r}
+# Clear workspace
+rm(list = ls())
+gc()
+
+# Libraries 
+library(terra)
+library(here)
+library(dplyr)
+library(aws.s3)
+
+# Authenticate aws
+source(here::here('aws_cred.R'))
+
+# Base S3 location (GDAL-style path)
+s3_base <- "/vsis3/sagemaker-gst-stage.sharing/ciara-hovis/TomoPrairie/bd_data"
+
+ind.dir <- file.path(s3_base, "indicators")
+
+```
+
+# Load Data
+
+## Load Indicator Stack
+
+```{r}
+cat("Loading indicator stack...\n")
+
+stack_path <- file.path(ind.dir, "indicators_stack.tif")
+indicators <- rast(stack_path)
+
+cat("Indicator stack loaded:\n")
+cat("  Layers:", nlyr(indicators), "\n")
+cat("  Layer names:", paste(names(indicators), collapse = ", "), "\n")
+cat("  CRS:", crs(indicators), "\n")
+cat("  Extent:", ext(indicators), "\n\n")
+
+```
+
+# Calculate Pixel Counts
+
+For each indicator layer, sum the pixel values. Since all layers are binary (0 or 1), the sum equals the pixel count.
+
+```{r}
+# Setup logging
+log_file <- here::here(
+  "logs",
+  paste0("indicator_progress_studyarea_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".log")
+)
+
+dir.create(dirname(log_file), showWarnings = FALSE, recursive = TRUE)
+
+log_msg <- function(msg) {
+  timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+  cat(sprintf("[%s] %s\n", timestamp, msg),
+      file = log_file,
+      append = TRUE)
+}
+
+log_msg("Starting indicator calculation (v3 - raster stack)")
+log_msg(paste("Total indicators:", nlyr(indicators)))
+
+```
+
+```{r}
+# Calculate pixel count for each layer
+cat("Calculating pixel counts...\n")
+
+results <- data.frame(
+  indicator_id = names(indicators),
+  pixel_ones = NA_real_,
+  stringsAsFactors = FALSE
+)
+
+for (i in seq_len(nlyr(indicators))) {
+  
+  id <- names(indicators)[[i]]
+  
+  log_msg(sprintf("Indicator %s: started", id))
+  
+  tryCatch({
+    
+    # Extract layer and sum pixel values
+    layer <- indicators[[i]]
+    pix_count <- sum(values(layer), na.rm = TRUE)
+    
+    results$pixel_ones[i] <- pix_count
+    
+    log_msg(sprintf("Indicator %s: pixel count = %f", id, pix_count))
+    log_msg(sprintf("Indicator %s: finished", id))
+    
+  }, error = function(e) {
+    log_msg(sprintf("Indicator %s: ERROR - %s", id, e$message))
+  })
+  
+  # Progress update every 5 indicators
+  if (i %% 5 == 0) {
+    cat(sprintf("  Processed %d of %d indicators\n", i, nlyr(indicators)))
+  }
+}
+
+log_msg("Indicator calculation completed")
+
+cat("Pixel count calculation complete.\n\n")
+
+```
+
+# Output Results
+
+```{r}
+# Display results
+cat("Results:\n")
+print(results)
+cat("\n")
+
+# Summary statistics
+cat("Summary:\n")
+cat("  Total indicators:", nrow(results), "\n")
+cat("  Mean pixel count:", mean(results$pixel_ones, na.rm = TRUE), "\n")
+cat("  Min pixel count:", min(results$pixel_ones, na.rm = TRUE), "\n")
+cat("  Max pixel count:", max(results$pixel_ones, na.rm = TRUE), "\n\n")
+
+```
+
+# Save to S3
+
+```{r}
+# Write local temp CSV
+tmp_csv <- tempfile(fileext = ".csv")
+
+write.csv(
+  results,
+  tmp_csv,
+  row.names = FALSE
+)
+
+# Upload to S3
+cat("Uploading results to S3...\n")
+
+aws.s3::put_object(
+  file   = tmp_csv,
+  bucket = "sagemaker-gst-stage.sharing",
+  object = "ciara-hovis/TomoPrairie/results/indicators_studyarea_pixel_counts_v3.csv"
+)
+
+log_msg("Saved indicators_studyarea_pixel_counts_v3.csv to S3")
+
+cat("Results saved to S3:\n")
+cat("  s3://sagemaker-gst-stage.sharing/ciara-hovis/TomoPrairie/results/indicators_studyarea_pixel_counts_v3.csv\n\n")
+
+```
+
+# Cleanup
+
+```{r}
+rm(list = ls())
+gc()
+
+cat("Script 2.0 v3 complete.\n")
+```

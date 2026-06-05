@@ -185,6 +185,9 @@ refugia_grassbird <- project(refugia_grassbird, roi3) |> crop(roi3, mask = TRUE)
 
 grassbird_pct <- to_percentile(refugia_grassbird)
 ind_sh_2_1a <- ifel(grassbird_pct >= 0.95, 1, 0)
+# Align to template extent
+ind_sh_2_1a <- crop(ind_sh_2_1a, template)
+ind_sh_2_1a <- merge(ind_sh_2_1a, template)
 
 rm(refugia_grassbird, grassbird_pct)
 gc()
@@ -199,6 +202,9 @@ refugia_scrubbird <- project(refugia_scrubbird, roi3) |> crop(roi3, mask = TRUE)
 
 scrubbird_pct <- to_percentile(refugia_scrubbird)
 ind_sh_2_1b <- ifel(scrubbird_pct >= 0.95, 1, 0)
+# Align to template extent
+ind_sh_2_1b <- crop(ind_sh_2_1b, template)
+ind_sh_2_1b <- merge(ind_sh_2_1b, template)
 
 rm(refugia_scrubbird, scrubbird_pct, to_percentile)
 gc()
@@ -296,6 +302,9 @@ intact <- rast(intact_path) |> project(roi3) |> crop(roi3, mask = TRUE)
 intact_rc <- ifel((intact == 0) | (intact == 1), 1, 0)
 
 ind_gc_3_1 <- intact_rc
+# Align to template extent
+ind_gc_3_1 <- crop(ind_gc_3_1, template)
+ind_gc_3_1 <- merge(ind_gc_3_1, template)
 
 rm(intact_path, intact, intact_rc)
 gc()
@@ -313,6 +322,9 @@ native <- rast(native_path) |> project(roi3) |> crop(roi3, mask = TRUE)
 
 # Native grassland: keep as-is but ensure binary
 ind_gc_3_2 <- ifel(native > 0, 1, 0)
+# Align to template extent
+ind_gc_3_2 <- crop(ind_gc_3_2, template)
+ind_gc_3_2 <- merge(ind_gc_3_2, template)
 
 rm(native_path, native)
 gc()
@@ -335,6 +347,9 @@ conn_pct <- conn
 values(conn_pct) <- ecdf_fun(values(conn))
 
 ind_gc_3_3 <- ifel(conn_pct >= 0.95, 1, 0)
+# Align to template extent
+ind_gc_3_3 <- crop(ind_gc_3_3, template)
+ind_gc_3_3 <- merge(ind_gc_3_3, template)
 
 rm(conn_path, conn, conn_pct, vals, ecdf_fun)
 gc()

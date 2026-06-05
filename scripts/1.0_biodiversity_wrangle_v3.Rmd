@@ -54,7 +54,7 @@ values(template) <- 0
 # Log template properties
 cat("Template raster properties:\n")
 cat("  CRS:", crs(template), "\n")
-cat("  Extent:", ext(template), "\n")
+cat(" Extent:", as.character(ext(template)), "\n")
 cat("  Resolution:", res(template), "\n")
 cat("  Dimensions:", dim(template), "\n\n")
 
